@@ -1,0 +1,36 @@
+name = "vezvezak-api"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# D1 (SQLite) — create once with:
+#   npx wrangler d1 create vezvezak
+# then paste the printed database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "vezvezak"
+database_id = "52d0794c-3e6e-4f82-b182-2441e50e4afb"
+
+# Workers AI — used ONLY to moderate app reviews (genuine vs spam) so the
+# one-time points reward can't be farmed. Optional: without it the API falls
+# back to a deterministic quality check and reports verifiedByServer:false.
+[ai]
+binding = "AI"
+
+# Observability is OFF (Ehsan 2026-08-11). Our published privacy policy states our
+# servers do not log requests. Workers Observability captures the INVOCATION URL, and
+# several vezvezak-api routes carry lat/lng and other data in the query string
+# (index.js: nearby/verified/jobs) — so enabling this would log precise-ish location
+# and make that privacy statement false. It was `enabled = true` in this file while
+# the deployed worker had it OFF (observability:null) — a landmine that the next
+# `wrangler deploy` would have tripped. Kept false, and enforced by
+# scripts/observability-gate.mjs (fail-closed) so it cannot silently flip on again.
+[observability]
+enabled = false
+
+# Secrets (NEVER put these in this file — it is committed):
+#   npx wrangler secret put JWT_SECRET       # long random string; rotating it signs everyone out
+#   npx wrangler secret put RESEND_API_KEY   # optional, enables emailed OTP codes
+#
+# Non-secret vars:
+[vars]
+MAIL_FROM = "Vezvezak <noreply@vezvezak.com>"

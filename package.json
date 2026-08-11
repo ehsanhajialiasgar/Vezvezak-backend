@@ -1,0 +1,12 @@
+{
+  "name": "vezvezak-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute vezvezak --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute vezvezak --local --file=./schema.sql",
+    "test": "node test/crypto.test.mjs"
+  }
+}
