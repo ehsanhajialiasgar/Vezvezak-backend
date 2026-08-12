@@ -451,8 +451,12 @@ async function jobSubmit(request, env) {
   return ok({ id });
 }
 
-async function jobsNearby(request, env, url) {
-  const lat = parseFloat(url.searchParams.get('lat')); const lng = parseFloat(url.searchParams.get('lng'));
+async function jobsNearby(request, env) {
+  // Coordinates come in the POST BODY, never the URL query (Ehsan 2026-08-11) — a
+  // URL is captured by any request log; a body is not. Coordinates are already
+  // coarse (~110m) on the device.
+  const body = await readJson(request) || {};
+  const lat = parseFloat(body.lat); const lng = parseFloat(body.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return json(200, { jobs: [] });
   // Bounding box (~40mi) then exact distance — cheap and index-friendly.
   const d = 0.6;
@@ -646,8 +650,11 @@ async function affiliatePostback(request, env, url) {
 
 // Let a device reconcile which of its clicks have converted (for a future
 // "confirmed purchases" view). Returns only clickIds — no amounts, no PII.
-async function affiliateStatus(request, env, url) {
-  const device = url.searchParams.get('device') || '';
+async function affiliateStatus(request, env) {
+  // Device id in the POST BODY, never the URL query (Ehsan 2026-08-11) — it is
+  // hashed here and never stored raw, but it must not sit in a loggable URL either.
+  const body = await readJson(request) || {};
+  const device = body.device || '';
   if (!device) return fail(400, 'Missing device.');
   const rl = await rateLimit(env, `affstatus:${await ipHash(request, env)}`, 120, 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many requests.');
@@ -774,10 +781,12 @@ async function catalogBulk(request, env) {
 // "Verified on Vezvezak" check for a search result. Returns verified:true ONLY
 // when a real, VERIFIED merchant matches by name AND is within ~150m of the
 // result — never a faked badge (Art.8). Empty/no-match => verified:false.
-async function merchantsVerified(request, env, url) {
-  const name = url.searchParams.get('name') || '';
-  const lat = parseFloat(url.searchParams.get('lat') || '');
-  const lng = parseFloat(url.searchParams.get('lng') || '');
+async function merchantsVerified(request, env) {
+  // Name + coordinates in the POST BODY, never the URL query (Ehsan 2026-08-11).
+  const body = await readJson(request) || {};
+  const name = body.name || '';
+  const lat = parseFloat(body.lat);
+  const lng = parseFloat(body.lng);
   if (!name || !Number.isFinite(lat) || !Number.isFinite(lng)) return ok({ verified: false });
   const d = 0.003; // ~300m bounding box; exact distance filtered in JS
   const { results } = await env.DB.prepare(
@@ -965,7 +974,7 @@ export default {
       if (post && p === '/referral/claim') return referralClaim(request, env);
 
       if (post && p === '/jobs/submit') return jobSubmit(request, env);
-      if (get && p === '/jobs/nearby') return jobsNearby(request, env, url);
+      if (post && p === '/jobs/nearby') return jobsNearby(request, env);
       if (post && p === '/ads/submit') return adSubmit(request, env);
       if (post && p === '/verification/start') return verificationStart(request, env);
       if (get && p === '/verification/status') return verificationStatus(request, env, url);
@@ -978,7 +987,7 @@ export default {
 
       if (post && p === '/affiliate/click') return affiliateClick(request, env);
       if ((post || get) && p === '/affiliate/postback') return affiliatePostback(request, env, url);
-      if (get && p === '/affiliate/status') return affiliateStatus(request, env, url);
+      if (post && p === '/affiliate/status') return affiliateStatus(request, env);
 
       // Server-authoritative AI usage (anti-abuse; Ehsan P0).
       if (post && p === '/usage/check') return usageCheck(request, env);
@@ -988,7 +997,7 @@ export default {
       if (post && p === '/catalog/bulk') return catalogBulk(request, env);
       if (get && p === '/catalog') return catalogList(request, env, url);
       if (get && p === '/merchants/mine') return merchantsMine(request, env);
-      if (get && p === '/merchants/verified') return merchantsVerified(request, env, url);
+      if (post && p === '/merchants/verified') return merchantsVerified(request, env);
 
       // Reads ONE public page (robots.txt-obeying, self-identifying) and returns
       // published prices with confidence + provenance. See extract.js.
