@@ -42,11 +42,15 @@ const GLOBAL_PER_MIN = 120;          // global rate cap, INDEPENDENT of per-user
 // Global daily ceiling on the BILLABLE Llama fallback. Derivation: the semantic
 // fallback is the only cost driver — one @cf/meta/llama-3.3-70b call (~≤2k input +
 // ≤700 output tokens). At Cloudflare Workers-AI list pricing that is on the order of
-// ~$0.002–0.005 per call (LIST-PRICE ESTIMATE — not a measured bill; verify against
-// a real invoice). A ceiling of 500/day bounds the worst case to roughly $1–2.5/day
-// (~$30–75/mo) even under sustained abuse, while leaving generous headroom for the
-// (currently zero) legitimate app demand. When the ceiling is hit we return
-// `unavailable` and NEVER reach inference.
+// ~$0.002–0.005 per call, so 500/day bounds worst-case spend to ~$1–2.5/day
+// (~$30–75/mo) even under sustained abuse, with headroom for the (currently zero)
+// legitimate demand. When the ceiling is hit we return `unavailable` and NEVER
+// reach inference.
+//
+// ⚠️ CAVEAT (Ehsan 2026-08-11): the ~$0.002–0.005/call figure is CLOUDFLARE LIST
+// PRICE, computed from token counts — it was NEVER verified against a real invoice.
+// When we have an actual Workers-AI bill, re-derive this ceiling from measured cost
+// per call and update this constant. $30–75/mo worst case is accepted as-is for now.
 const AI_DAILY_CEILING = 500;
 
 // CALL-HISTORY NOTE (Ehsan 2026-08-11): whether /extract was ever hit at volume
@@ -252,10 +256,19 @@ export function blockedReason(u) {
     if (a === 100 && b >= 64 && b <= 127) return 'internal';        // CGNAT 100.64/10
     return null;
   }
-  // A hostname (not an IP literal): block the obvious private spellings. A real name
-  // that RESOLVES to an internal IP (DNS rebinding) cannot be caught here — see the
-  // limitation note in extractPublicPage; the Workers runtime gives no way to pin
-  // the resolved IP before fetch.
+  // A hostname (not an IP literal): block the obvious private spellings.
+  //
+  // ⚠️ KNOWN LIMITATION — DNS REBINDING (accepted, Ehsan 2026-08-11): a real name
+  // that RESOLVES to an internal IP cannot be caught here. Mitigating it requires
+  // resolving the host ourselves, PINNING that IP, and fetching that exact IP — and
+  // the Cloudflare Workers runtime exposes NO API to resolve a name or pin a
+  // connection to an IP (fetch() resolves internally). Accepted because on Workers
+  // internal/loopback/metadata addresses are not reachable as they are from a cloud
+  // VM, and this endpoint is now authenticated.
+  // ‼️ IF THIS CODE EVER MOVES TO NODE / A VM / A CONTAINER: DNS rebinding becomes a
+  // real, exploitable SSRF. Before any such migration you MUST add resolve-then-pin
+  // (look up the host, reject if the resolved IP is private/link-local, then fetch
+  // that pinned IP with the Host header preserved). Do not port this file as-is.
   if (/^(0\.0\.0\.0|127\.|10\.|192\.168\.|169\.254\.)/.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) return 'internal';
   return null;
 }
