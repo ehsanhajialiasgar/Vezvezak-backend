@@ -3,6 +3,8 @@
  * Runs on the Cloudflare Workers runtime (WebCrypto only — no Node APIs).
  */
 
+import { resolvePlan } from './usage.js';
+
 export const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
@@ -158,4 +160,14 @@ export async function ipHash(request, env) {
 
 export async function readJson(request) {
   try { return await request.json(); } catch { return null; }
+}
+
+// Server-authoritative plan for a user. Reads user_plans (written owner-side by
+// IAP receipt validation) and folds it onto a live tier; ABSENT ⇒ 'free', so the
+// server always enforces free limits even before a paid plan is written. Shared
+// by index.js (caps + moderation gate) and extract.js (paid-only gate).
+export async function planFor(env, userId) {
+  if (!userId) return 'free';
+  const row = await env.DB.prepare('SELECT plan FROM user_plans WHERE user_id = ?').bind(userId).first();
+  return resolvePlan(row?.plan);
 }

@@ -29,12 +29,16 @@
 
 import {
   CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword,
-  signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson,
+  signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor,
 } from './lib.js';
 import { extractPublicPage } from './extract.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
+import {
+  WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, resolvePlan, planCaps, billableAiAllowed,
+  refillSlot, windowStartFor, nextResetMs, shouldRefill, capReached,
+} from './usage.js';
 
 const OTP_TTL_MS = 10 * 60 * 1000;      // 10 minutes
 const OTP_MAX_ATTEMPTS = 5;
@@ -226,6 +230,82 @@ async function me(request, env) {
   return json(200, { user: publicUser(user) });
 }
 
+// ── account data rights: export + real erasure (Ehsan 2026-08-13) ────────────
+// GDPR/CCPA + Apple's account-deletion requirement. The app tells the user their
+// data is erased and cannot be undone, so this must be TRUE — not a cascade we
+// can't rely on (D1 does not guarantee PRAGMA foreign_keys = ON per connection),
+// but explicit statements per table, run as one atomic batch.
+//
+// FULL DELETION of everything the user created — reviews, app reviews and merchant
+// listings included. Their free-text fields (a review body, a store address/notes)
+// can carry personal detail that nulling a foreign key would leave behind, so "all
+// your data is erased" must mean DELETED, not anonymised. (A future opt-in "keep my
+// reviews anonymously" screen is the corpus-preserving path — a tracked follow-up.)
+//
+// NOT deletable here — named for the privacy policy, because none is attributable
+// to the person: affiliate_clicks + conversions (a one-way device_hash, no user_id
+// — commission settlement records), an INCOMING referred_hash (a device hash, not
+// this account), and telemetry (PII-free by construction). We deliberately do NOT
+// send a deviceId at deletion to reach them — creating a user↔device link at the
+// moment of erasure is the wrong trade (Ehsan).
+const DELETE_BY_USER_ID = ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'ads', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches'];
+
+export async function accountDelete(request, env) {
+  const claims = await requireAuth(request, env);
+  if (!claims?.sub) return fail(401, 'Sign in required.');
+  const uid = claims.sub;
+  // Success is reported ONLY when a real account is actually erased.
+  const user = await env.DB.prepare('SELECT id, identifier FROM users WHERE id = ?').bind(uid).first();
+  if (!user) return fail(404, 'Account not found.');
+  const identifier = user.identifier;
+  const codeRow = await env.DB.prepare('SELECT code FROM referral_codes WHERE user_id = ?').bind(uid).first();
+
+  const P = (sql, ...b) => env.DB.prepare(sql).bind(...b);
+  const stmts = [];
+  // catalog_variants has no user_id — delete via the user's catalog_items FIRST
+  // (the subquery must run before catalog_items itself is deleted).
+  stmts.push(P('DELETE FROM catalog_variants WHERE item_id IN (SELECT id FROM catalog_items WHERE user_id = ?)', uid));
+  for (const tbl of DELETE_BY_USER_ID) stmts.push(P(`DELETE FROM ${tbl} WHERE user_id = ?`, uid)); // tbl is a fixed const, never user input
+  stmts.push(P('DELETE FROM otp_codes WHERE identifier = ?', identifier));
+  stmts.push(P('DELETE FROM reset_tokens WHERE identifier = ?', identifier));
+  if (codeRow?.code) stmts.push(P('DELETE FROM referrals WHERE referrer_code = ?', codeRow.code)); // the user's OUTBOUND invites only
+  // Ephemeral abuse counters that embed the identifier / user id (they self-expire too).
+  stmts.push(P('DELETE FROM rate_limits WHERE bucket LIKE ?', `%${identifier}%`));
+  stmts.push(P('DELETE FROM rate_limits WHERE bucket LIKE ?', `%${uid}%`));
+  // The account itself LAST.
+  stmts.push(P('DELETE FROM users WHERE id = ?', uid));
+
+  await env.DB.batch(stmts);   // one atomic transaction
+  return ok({ deleted: true });
+}
+
+export async function accountExport(request, env) {
+  const claims = await requireAuth(request, env);
+  if (!claims?.sub) return fail(401, 'Sign in required.');
+  const uid = claims.sub;
+  // Never export password material (pw_hash / pw_salt / pw_iter).
+  const account = await env.DB.prepare('SELECT id, identifier, channel, name, verified, created_at, last_login_at FROM users WHERE id = ?').bind(uid).first();
+  if (!account) return fail(404, 'Account not found.');
+  const q = async (sql) => (await env.DB.prepare(sql).bind(uid).all()).results || [];
+  const data = {
+    exportedAt: nowIso(),
+    account,
+    reviews: await q('SELECT id, subject, stars, text, lang, created_at FROM reviews WHERE user_id = ?'),
+    appReviews: await q('SELECT id, stars, text, approved, created_at FROM app_reviews WHERE user_id = ?'),
+    merchants: await q('SELECT id, store_name, category, biz_type, address, phone, website, status, submitted_at FROM merchants WHERE user_id = ?'),
+    catalogItems: await q('SELECT id, merchant_id, title, brand, model, gtin, category, status, created_at FROM catalog_items WHERE user_id = ?'),
+    jobs: await q('SELECT id, title, business, employment_type, address, phone, status, submitted_at FROM jobs WHERE user_id = ?'),
+    ads: await q('SELECT id, title, body, category, cta_url, phone, moderation_status, submitted_at FROM ads WHERE user_id = ?'),
+    influencers: await q('SELECT id, name, handle, offer, phone, website, status, submitted_at FROM influencers WHERE user_id = ?'),
+    verifications: await q('SELECT id, kind, company_name, is_company, status, submitted_at FROM verifications WHERE user_id = ?'),
+    feedback: await q('SELECT id, kind, text, status, created_at FROM feedback WHERE user_id = ?'),
+    referralCode: await q('SELECT code, created_at FROM referral_codes WHERE user_id = ?'),
+    plan: await q('SELECT plan, updated_at FROM user_plans WHERE user_id = ?'),
+    usage: await q('SELECT local_used, online_used, window_start FROM weekly_search_usage WHERE user_id = ?'),
+  };
+  return ok({ export: data });
+}
+
 // ── reviews (L5 corpus) ─────────────────────────────────────────────────────
 
 async function reviewSubmit(request, env) {
@@ -290,7 +370,12 @@ async function appReview(request, env) {
   const rl = await rateLimit(env, `appreview:${claims?.sub || (await ipHash(request, env))}`, 5, 24 * 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many submissions today.');
 
-  const verdict = await moderateReview(env, stars, text);
+  // Free (and anonymous) submissions never trigger a synchronous billable AI
+  // call — the review is stored unmoderated (awaiting_moderation). Paid tiers get
+  // live AI moderation. The gate lives inside moderateReview so env.AI is
+  // structurally unreachable for a free plan.
+  const plan = claims?.sub ? await planFor(env, claims.sub) : 'free';
+  const verdict = await moderateReview(env, stars, text, plan);
   await env.DB.prepare(
     'INSERT INTO app_reviews (id, user_id, stars, text, approved, reject_note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   ).bind(uid('arv'), claims?.sub || null, stars, text, verdict.approved ? 1 : 0, verdict.note || null, nowIso()).run();
@@ -298,7 +383,12 @@ async function appReview(request, env) {
   return json(200, { ok: true, approved: verdict.approved, verifiedByServer: verdict.byModel });
 }
 
-async function moderateReview(env, stars, text) {
+export async function moderateReview(env, stars, text, plan) {
+  // ZERO free-tier billable AI (Ehsan 2026-08-13): a free/anonymous submission is
+  // stored unmoderated and never reaches env.AI. Fail-closed reward gate is
+  // unchanged — unmoderated ⇒ not approved ⇒ no reward, no public wall.
+  if (!billableAiAllowed(plan)) return { approved: false, byModel: false, note: 'awaiting_moderation' };
+
   const words = text.split(/\s+/).filter(Boolean);
   // Only 4-5★ qualify for the wall/reward (Ehsan's rule); anything else is
   // stored but not approved — we still want the signal.
@@ -478,7 +568,8 @@ async function adSubmit(request, env) {
   if (b.isAdult) return fail(400, 'Adult content is not allowed.');   // policy
   const { claims, allowed } = await submitLimited(request, env, 'ad');
   if (!allowed) return fail(429, 'Too many submissions today.');
-  const verdict = await moderateReview(env, 5, `${b.title}\n${b.body}`);   // reuse the genuineness gate
+  const plan = claims?.sub ? await planFor(env, claims.sub) : 'free';
+  const verdict = await moderateReview(env, 5, `${b.title}\n${b.body}`, plan);   // reuse the genuineness gate (free → awaiting_moderation, no AI)
   const status = verdict.approved ? 'approved' : 'pending';
   const id = uid('ad');
   await env.DB.prepare('INSERT INTO ads (id,user_id,title,body,category,cta_url,phone,scope,is_adult,seller_type,country_code,latitude,longitude,luxury,moderation_status,submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -674,9 +765,13 @@ async function affiliateStatus(request, env) {
 // prohibited-content screen first (instant reject); then AI approves clean items
 // to live. FAILS CLOSED: no AI / AI error / model "NO" never auto-publishes —
 // the item stays 'pending' (or rejected), never silently live (Art.8).
-async function moderateCatalogItem(env, it) {
+export async function moderateCatalogItem(env, it, plan) {
   const text = `${it.title}\n${it.description || ''}\n${it.brand || ''} ${it.model || ''}`.trim();
   if (screenCatalogText(text).prohibited) return 'rejected';
+  // Free (and anonymous) sellers never trigger a synchronous billable AI call —
+  // the item is stored 'pending' for batch review. Paid tiers get live AI
+  // moderation. Deterministic prohibited-screen above still runs for everyone.
+  if (!billableAiAllowed(plan)) return 'pending';
   if (!env.AI) return 'pending';
   try {
     const r = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
@@ -733,7 +828,7 @@ async function catalogItemCreate(request, env) {
 
   const it = norm.value;
   const id = uid('cit');
-  const status = await moderateCatalogItem(env, it);
+  const status = await moderateCatalogItem(env, it, await planFor(env, claims.sub));
   await env.DB.prepare(
     `INSERT INTO catalog_items
       (id, merchant_id, user_id, title, brand, model, gtin, category, condition, description, image_url, status, created_at, updated_at)
@@ -882,58 +977,166 @@ async function telemetryIngest(request, env) {
 
 // ── router ──────────────────────────────────────────────────────────────────
 
-// ── Server-authoritative AI usage (anti-abuse; Ehsan P0) ──────────────────────
-// The client can be tampered with, so the daily free limits (and the paid usable
-// budget) are ALSO enforced here. Plan comes from user_plans (default 'free' —
-// so free limits are always authoritative even before IAP writes a paid plan).
-const USAGE_PLANS = {
-  free:   { searches: 5,          usableMonthlyUsd: 0 },
-  pro:    { searches: 1000000000, usableMonthlyUsd: 16 },
-  max:    { searches: 1000000000, usableMonthlyUsd: 81 },
-  max20x: { searches: 1000000000, usableMonthlyUsd: 162 },
-};
-function utcDay() { return new Date().toISOString().slice(0, 10); }
-function daysInMonthUtc() { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate(); }
+// ── Server-authoritative WEEKLY SEARCH CAPS (anti-abuse; Ehsan 2026-08-13) ─────
+// The client can be tampered with, so the cap is enforced HERE, at consume time,
+// as a COUNT of live searches per week (local + online separately). There is NO
+// monetary balance anywhere — no dollars stored or derived per user. Caps live in
+// usage.js (WEEKLY_CAPS), mirroring the client's pricingStrategy.ts; the numbers
+// refill (never expire) at each account's staggered weekly boundary.
+//
+// NOTE ON WHERE THE MONEY IS: the paid upstreams (Google Places, SerpApi) are
+// spent by the SEPARATE `vezvezakproxy` Worker, which the app calls directly.
+// Counting here is authoritative ONLY if the proxy refuses to spend without a
+// successful consume. Option B (approved): the proxy forwards the caller's JWT to
+// /search/consume and spends only on 200. See docs + the proxy worker.
 
-async function userPlan(env, userId) {
-  const row = await env.DB.prepare('SELECT plan FROM user_plans WHERE user_id = ?').bind(userId).first();
-  const plan = row && USAGE_PLANS[row.plan] ? row.plan : 'free';
-  return { plan, cfg: USAGE_PLANS[plan] };
-}
-async function usageRow(env, userId) {
-  const day = utcDay();
-  const row = await env.DB.prepare('SELECT searches, used_usd FROM ai_usage WHERE user_id = ? AND day = ?').bind(userId, day).first();
-  return { day, searches: row ? row.searches : 0, used_usd: row ? row.used_usd : 0 };
+// Load the account's weekly row, creating it (with a staggered refill slot) on
+// first use and lazily REFILLING it when its weekly boundary has passed. Returns
+// the current counts + the window. Never stores money.
+async function weeklyRow(env, userId) {
+  const now = Date.now();
+  const row = await env.DB.prepare(
+    'SELECT local_used, online_used, window_start, refill_dow, refill_minute FROM weekly_search_usage WHERE user_id = ?',
+  ).bind(userId).first();
+
+  if (!row) {
+    const slot = refillSlot(userId);
+    const ws = windowStartFor(now, slot.dow, slot.minute);
+    await env.DB.prepare(
+      'INSERT OR IGNORE INTO weekly_search_usage (user_id, local_used, online_used, window_start, refill_dow, refill_minute, updated_at) VALUES (?, 0, 0, ?, ?, ?, ?)',
+    ).bind(userId, ws, slot.dow, slot.minute, nowIso()).run();
+    return { local_used: 0, online_used: 0, window_start: ws, refill_dow: slot.dow, refill_minute: slot.minute };
+  }
+
+  if (shouldRefill(now, row.window_start, row.refill_dow, row.refill_minute)) {
+    // REFILL — counts reset to 0 and the window advances to the boundary. Nothing
+    // carried over, nothing forfeited; the same full cap is available again.
+    const boundary = windowStartFor(now, row.refill_dow, row.refill_minute);
+    await env.DB.prepare(
+      'UPDATE weekly_search_usage SET local_used = 0, online_used = 0, window_start = ?, updated_at = ? WHERE user_id = ?',
+    ).bind(boundary, nowIso(), userId).run();
+    // Prune the previous window's per-search dedupe rows — they only matter within
+    // the window they were consumed in.
+    await env.DB.prepare('DELETE FROM consumed_searches WHERE user_id = ? AND window_start < ?').bind(userId, boundary).run();
+    return { local_used: 0, online_used: 0, window_start: boundary, refill_dow: row.refill_dow, refill_minute: row.refill_minute };
+  }
+  return row;
 }
 
+function usedFor(row, kind) { return kind === 'local' ? row.local_used : row.online_used; }
+
+// Atomic check-and-consume: refuse at/over cap WITHOUT incrementing, else bump the
+// counter under a `< cap` guard (so a race can never push past the cap). A search
+// bundle's sub-calls share ONE vz_sid (searchId) and DEDUPE into ONE slot, so the
+// cap counts whole searches, not API calls. This is the ONLY endpoint that grants
+// a live-search slot. kind 'photo' is a sub-call ceiling check (no slot).
+export async function searchConsume(request, env) {
+  const claims = await requireAuth(request, env);
+  if (!claims?.sub) return fail(401, 'Sign in required.');
+  const b = await readJson(request);
+  const kind = String(b?.kind || '');
+  const searchId = String(b?.searchId || '').slice(0, 80) || null;
+
+  // A Photo is a sub-call of an already-consumed local search — bounded, not a slot.
+  if (kind === 'photo') return photoConsume(env, claims.sub, searchId);
+
+  // Only 'local' | 'online' are metered as slots. Accessibility (voice.*) is never
+  // sent here and would be rejected as non-billable — never counted on any tier.
+  if (!METERED_KINDS.has(kind)) return fail(400, 'kind must be "local", "online" or "photo".');
+
+  const plan = await planFor(env, claims.sub);
+  const cap = planCaps(plan)[kind];
+  const row = await weeklyRow(env, claims.sub);
+  const used = usedFor(row, kind);
+  const resetAt = new Date(nextResetMs(row.window_start)).toISOString();
+  const refuse = () => json(402, { allowed: false, reason: 'cap_reached', kind, plan, cap, used: Math.min(used, cap), remaining: 0, resetAt });
+
+  // Fail CLOSED: clearly at/over cap → refuse, no increment, no dedupe row, no
+  // fall-through to a billable call. Free local (cap 0) refuses every time.
+  if (capReached(cap, used)) return refuse();
+
+  // DEDUPE: the first sub-call of a bundle inserts its (user, vz_sid, kind) row and
+  // takes the slot; later sub-calls of the SAME bundle find the row and are allowed
+  // WITHOUT a second increment. Insert-first also closes the race between two
+  // concurrent first-sub-calls of the same bundle (only one insert wins).
+  if (searchId) {
+    const ins = await env.DB.prepare(
+      'INSERT OR IGNORE INTO consumed_searches (user_id, search_id, kind, window_start, photos_used, created_at) VALUES (?, ?, ?, ?, 0, ?)',
+    ).bind(claims.sub, searchId, kind, row.window_start, nowIso()).run();
+    if (!(ins?.meta?.changes)) {
+      // Already consumed by this bundle this window → idempotent allow.
+      return ok({ allowed: true, kind, plan, cap, used, remaining: Math.max(0, cap - used), resetAt, idempotent: true });
+    }
+  }
+
+  const col = kind === 'local' ? 'local_used' : 'online_used';   // fixed identifiers, never user input
+  const res = await env.DB.prepare(
+    `UPDATE weekly_search_usage SET ${col} = ${col} + 1, updated_at = ? WHERE user_id = ? AND ${col} < ?`,
+  ).bind(nowIso(), claims.sub, cap).run();
+  if (!(res?.meta?.changes)) {
+    // Lost the last slot to a concurrent bundle — undo the dedupe row we inserted so
+    // a legitimate retry after refill isn't wrongly treated as already-consumed.
+    if (searchId) await env.DB.prepare('DELETE FROM consumed_searches WHERE user_id = ? AND search_id = ? AND kind = ? AND window_start = ?').bind(claims.sub, searchId, kind, row.window_start).run();
+    return refuse();
+  }
+  return ok({ allowed: true, kind, plan, cap, used: used + 1, remaining: cap - (used + 1), resetAt });
+}
+
+// Sub-call ceiling for Photos. A Photo consumes NO slot, but it must ride under a
+// LOCAL search this account actually consumed (its vz_sid row exists) and only up
+// to PHOTO_PER_SEARCH times — so a tampered client can't pull unlimited paid photos
+// for one search, or photos with a made-up id that never cost a slot. Atomic: the
+// bump only succeeds while a matching local row exists AND is under the ceiling.
+export async function photoConsume(env, userId, searchId) {
+  if (!searchId) return fail(400, 'A photo requires its search id.');
+  const row = await weeklyRow(env, userId);
+  const res = await env.DB.prepare(
+    'UPDATE consumed_searches SET photos_used = photos_used + 1 WHERE user_id = ? AND search_id = ? AND kind = ? AND window_start = ? AND photos_used < ?',
+  ).bind(userId, searchId, 'local', row.window_start, PHOTO_PER_SEARCH).run();
+  if (res?.meta?.changes) return ok({ allowed: true, kind: 'photo', ceiling: PHOTO_PER_SEARCH });
+  // No consumed local slot for this bundle, or the per-search photo ceiling is hit.
+  return json(402, { allowed: false, reason: 'photo_ceiling_or_no_search', kind: 'photo', ceiling: PHOTO_PER_SEARCH });
+}
+
+// Read-only status for the client's plain weekly readout (used / cap / remaining
+// / reset time, per kind). No money, no side effects (beyond the lazy refill).
+async function usageStatus(request, env) {
+  const claims = await requireAuth(request, env);
+  if (!claims?.sub) return fail(401, 'Sign in required.');
+  const plan = await planFor(env, claims.sub);
+  const caps = planCaps(plan);
+  const row = await weeklyRow(env, claims.sub);
+  const resetAt = new Date(nextResetMs(row.window_start)).toISOString();
+  return ok({
+    plan,
+    local:  { used: row.local_used,  cap: caps.local,  remaining: Math.max(0, caps.local  - row.local_used) },
+    online: { used: row.online_used, cap: caps.online, remaining: Math.max(0, caps.online - row.online_used) },
+    resetAt,
+  });
+}
+
+// ── DEPRECATED backward-compat shims (removed in the Part 2 client migration) ──
+// The un-migrated client still calls /usage/check and /usage/record with a single
+// {kind:'search'|'compute'} and no local/online split. Keep them responding so the
+// current build keeps working, but MONEY-FREE: they read the weekly model and
+// never touch a dollar. They are advisory only (they cannot gate the proxy); the
+// real slot grant is /search/consume. /usage/record no longer records anything —
+// consume is the sole writer, so these can't double-count.
 async function usageCheck(request, env) {
   const claims = await requireAuth(request, env);
   if (!claims?.sub) return fail(401, 'Sign in required.');
-  const b = await readJson(request);
-  const isSearch = (b?.kind || 'search') === 'search';
-  const { plan, cfg } = await userPlan(env, claims.sub);
-  const { searches, used_usd } = await usageRow(env, claims.sub);
-  const isFree = (cfg.usableMonthlyUsd || 0) <= 0;
-  const allowanceUsd = isFree ? 0 : +(cfg.usableMonthlyUsd / daysInMonthUtc()).toFixed(4);
-  const allowed = isSearch
-    ? (isFree ? searches < cfg.searches : used_usd < allowanceUsd)
-    : (!isFree && used_usd < allowanceUsd);
-  return ok({ allowed, plan, isFree, searchesUsed: searches, searchLimit: cfg.searches, usedUsd: used_usd, allowanceUsd });
+  const plan = await planFor(env, claims.sub);
+  const caps = planCaps(plan);
+  const row = await weeklyRow(env, claims.sub);
+  const isFree = resolvePlan(plan) === 'free';
+  const localLeft = caps.local - row.local_used;
+  const onlineLeft = caps.online - row.online_used;
+  return ok({ allowed: (localLeft > 0 || onlineLeft > 0), plan, isFree, deprecated: true, local: Math.max(0, localLeft), online: Math.max(0, onlineLeft) });
 }
-
 async function usageRecord(request, env) {
   const claims = await requireAuth(request, env);
   if (!claims?.sub) return fail(401, 'Sign in required.');
-  const b = await readJson(request);
-  const day = utcDay();
-  const addSearch = (b?.kind || 'search') === 'search' ? 1 : 0;
-  const addUsd = Math.max(0, Number(b?.costUsd) || 0);
-  await env.DB.prepare(
-    'INSERT INTO ai_usage (user_id, day, searches, used_usd, updated_at) VALUES (?, ?, ?, ?, ?) ' +
-    'ON CONFLICT(user_id, day) DO UPDATE SET searches = searches + ?, used_usd = used_usd + ?, updated_at = ?',
-  ).bind(claims.sub, day, addSearch, addUsd, nowIso(), addSearch, addUsd, nowIso()).run();
-  const { searches, used_usd } = await usageRow(env, claims.sub);
-  return ok({ searchesUsed: searches, usedUsd: used_usd });
+  return ok({ deprecated: true, note: 'recording moved to /search/consume' });
 }
 
 export default {
@@ -957,6 +1160,10 @@ export default {
       if (post && p === '/auth/otp/verify') return otpVerify(request, env);
       if (post && p === '/auth/password/reset') return passwordReset(request, env);
       if (get && p === '/auth/me') return me(request, env);
+
+      // Account data rights (GDPR/CCPA + Apple): real export + real erasure.
+      if (post && p === '/account/export') return accountExport(request, env);
+      if (post && p === '/account/delete') return accountDelete(request, env);
 
       // Product telemetry sink (Ehsan 2026-08-09). PII-free by construction: the
       // client whitelists keys, and telemetryIngest repeats the whitelist here
@@ -989,7 +1196,12 @@ export default {
       if ((post || get) && p === '/affiliate/postback') return affiliatePostback(request, env, url);
       if (post && p === '/affiliate/status') return affiliateStatus(request, env);
 
-      // Server-authoritative AI usage (anti-abuse; Ehsan P0).
+      // Server-authoritative weekly search caps (anti-abuse; Ehsan 2026-08-13).
+      // /search/consume is the ONLY endpoint that grants a live-search slot; the
+      // proxy forwards the caller's JWT here and spends only on a 200 (Option B).
+      if (post && p === '/search/consume') return searchConsume(request, env);
+      if (post && p === '/usage/status') return usageStatus(request, env);
+      // Deprecated advisory shims (removed in the Part 2 client migration).
       if (post && p === '/usage/check') return usageCheck(request, env);
       if (post && p === '/usage/record') return usageRecord(request, env);
 

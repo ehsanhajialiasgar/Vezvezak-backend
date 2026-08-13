@@ -28,7 +28,8 @@
  * returned as "unsure" rather than shown as a number. (Doctrine Art.2/Art.12.)
  */
 
-import { json, fail, rateLimit, readJson, nowIso, sha256, requireAuth } from './lib.js';
+import { json, fail, rateLimit, readJson, nowIso, sha256, requireAuth, planFor } from './lib.js';
+import { billableAiAllowed } from './usage.js';
 
 const UA = 'VezvezakBot/1.0 (+https://vezvezak.com/bot; respects robots.txt)';
 const MAX_BYTES = 600_000;          // never ingest more than a page's worth
@@ -311,6 +312,12 @@ export async function extractPublicPage(request, env) {
   // deliberate decision to revisit — not a silent default.
   const claims = await requireAuth(request, env);
   if (!claims) return fail(401, 'Sign in to use this.');
+
+  // Paid-only: /extract runs a billable page fetch + AI read. The free tier must
+  // incur zero billable AI (Ehsan 2026-08-13), so refuse a free plan BEFORE any
+  // fetch or env.AI call. Refusal is a distinct, honest code (not the generic
+  // unavailable() oracle) because tier is the caller's own account state.
+  if (!billableAiAllowed(await planFor(env, claims.sub))) return fail(402, 'This feature requires a paid plan.');
 
   const body = await readJson(request);
   if (!body?.url) return fail(400, 'A url is required.');

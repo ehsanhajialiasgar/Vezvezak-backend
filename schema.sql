@@ -270,16 +270,45 @@ CREATE TABLE IF NOT EXISTS user_plans (
   updated_at TEXT
 );
 
--- ai_usage counts each user's compute-costing actions PER DAY, server-side, so a
--- tampered client can never grant itself free AI. One row per (user, UTC day).
-CREATE TABLE IF NOT EXISTS ai_usage (
-  user_id    TEXT NOT NULL,
-  day        TEXT NOT NULL,                  -- YYYY-MM-DD (UTC)
-  searches   INTEGER NOT NULL DEFAULT 0,     -- product searches used today
-  used_usd   REAL NOT NULL DEFAULT 0,        -- compute $ spent today
-  updated_at TEXT,
-  PRIMARY KEY (user_id, day)
+-- weekly_search_usage — the server-authoritative WEEKLY CAP counters (Ehsan
+-- 2026-08-13). Local and online live searches are counted SEPARATELY as COUNTS.
+-- There is NO monetary column: the cap is never money, never a balance, and no
+-- dollar figure is stored per user anywhere. The cap REFILLS at the account's
+-- staggered weekly boundary — used → 0, the same full cap available again —
+-- nothing rolls over, expires, or is forfeited (hence window_start/refill_*,
+-- never "spent"/"remaining_usd"). This REPLACES the old daily ai_usage table
+-- (which stored a per-user compute dollar balance — removed on purpose).
+CREATE TABLE IF NOT EXISTS weekly_search_usage (
+  user_id       TEXT PRIMARY KEY,
+  local_used    INTEGER NOT NULL DEFAULT 0,   -- live LOCAL (Google Places) searches used this window
+  online_used   INTEGER NOT NULL DEFAULT 0,   -- live ONLINE (SerpApi) searches used this window
+  window_start  INTEGER NOT NULL,             -- epoch ms: start of the current weekly window (last refill boundary)
+  refill_dow    INTEGER NOT NULL,             -- 0-6: assigned reset weekday (staggered per account, from a hash of user_id)
+  refill_minute INTEGER NOT NULL,             -- 0-1439: assigned reset minute-of-day (staggered)
+  updated_at    TEXT
 );
+
+-- Retire the old per-user dollar-balance table if a previous deploy created it.
+-- The cap model stores COUNTS only; no per-user dollar balance survives in D1.
+DROP TABLE IF EXISTS ai_usage;
+
+-- consumed_searches — makes a weekly CAP mean whole SEARCHES, not API calls
+-- (Ehsan 2026-08-13, Part 1b). One user search fans out to Text + Nearby (+ a
+-- few Photos); they share ONE client vz_sid and collapse into ONE slot here, so a
+-- Pro user's "18 local" is 18 real searches, not 9. Also the sub-call ceiling:
+-- photos_used bounds how many paid Photo fetches may ride under a single local
+-- slot, so a tampered client can't pull unlimited photos for one consumed search.
+-- Rows are scoped to window_start and pruned when the weekly window refills.
+CREATE TABLE IF NOT EXISTS consumed_searches (
+  user_id      TEXT NOT NULL,
+  search_id    TEXT NOT NULL,                 -- client vz_sid, one per search bundle
+  kind         TEXT NOT NULL,                 -- 'local' | 'online' (the slot this bundle took)
+  window_start INTEGER NOT NULL,              -- the weekly window this slot belongs to
+  photos_used  INTEGER NOT NULL DEFAULT 0,    -- paid Photo sub-calls ridden under this (local) slot
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (user_id, search_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_consumed_window ON consumed_searches(user_id, window_start);
 
 -- ── Telemetry (Ehsan 2026-08-09) ────────────────────────────────────────────
 -- PII-free by construction. Every column is a whitelisted, non-identifying field:
