@@ -248,7 +248,7 @@ async function me(request, env) {
 // this account), and telemetry (PII-free by construction). We deliberately do NOT
 // send a deviceId at deletion to reach them — creating a user↔device link at the
 // moment of erasure is the wrong trade (Ehsan).
-const DELETE_BY_USER_ID = ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'ads', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches'];
+const DELETE_BY_USER_ID = ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches'];
 
 export async function accountDelete(request, env) {
   const claims = await requireAuth(request, env);
@@ -295,7 +295,6 @@ export async function accountExport(request, env) {
     merchants: await q('SELECT id, store_name, category, biz_type, address, phone, website, status, submitted_at FROM merchants WHERE user_id = ?'),
     catalogItems: await q('SELECT id, merchant_id, title, brand, model, gtin, category, status, created_at FROM catalog_items WHERE user_id = ?'),
     jobs: await q('SELECT id, title, business, employment_type, address, phone, status, submitted_at FROM jobs WHERE user_id = ?'),
-    ads: await q('SELECT id, title, body, category, cta_url, phone, moderation_status, submitted_at FROM ads WHERE user_id = ?'),
     influencers: await q('SELECT id, name, handle, offer, phone, website, status, submitted_at FROM influencers WHERE user_id = ?'),
     verifications: await q('SELECT id, kind, company_name, is_company, status, submitted_at FROM verifications WHERE user_id = ?'),
     feedback: await q('SELECT id, kind, text, status, created_at FROM feedback WHERE user_id = ?'),
@@ -562,24 +561,6 @@ async function jobsNearby(request, env) {
   return json(200, { jobs });
 }
 
-async function adSubmit(request, env) {
-  const b = await readJson(request); if (!b) return fail(400, 'Invalid request.');
-  if (!String(b.title || '').trim() || !String(b.body || '').trim()) return fail(400, 'Title and body are required.');
-  if (b.isAdult) return fail(400, 'Adult content is not allowed.');   // policy
-  const { claims, allowed } = await submitLimited(request, env, 'ad');
-  if (!allowed) return fail(429, 'Too many submissions today.');
-  const plan = claims?.sub ? await planFor(env, claims.sub) : 'free';
-  const verdict = await moderateReview(env, 5, `${b.title}\n${b.body}`, plan);   // reuse the genuineness gate (free → awaiting_moderation, no AI)
-  const status = verdict.approved ? 'approved' : 'pending';
-  const id = uid('ad');
-  await env.DB.prepare('INSERT INTO ads (id,user_id,title,body,category,cta_url,phone,scope,is_adult,seller_type,country_code,latitude,longitude,luxury,moderation_status,submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-    .bind(id, claims?.sub || null, b.title.trim(), b.body.trim(), b.category || null, (b.ctaUrl || '').trim() || null,
-      (b.phone || '').trim() || null, b.scope || 'local', 0, b.sellerType || null, b.countryCode || null,
-      Number.isFinite(b.latitude) ? b.latitude : null, Number.isFinite(b.longitude) ? b.longitude : null,
-      b.luxury ? 1 : 0, status, b.submittedAt || nowIso()).run();
-  return ok({ id, moderationStatus: status });
-}
-
 async function verificationStart(request, env) {
   const b = await readJson(request); if (!b) return fail(400, 'Invalid request.');
   const claims = await requireAuth(request, env);
@@ -643,31 +624,6 @@ async function feedbackSubmit(request, env) {
   return ok({ received: true });
 }
 
-async function couponsList(request, env, url) {
-  const country = (url.searchParams.get('country') || '').toUpperCase();
-  const now = nowIso();
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM coupons WHERE (country IS NULL OR country = ?) AND (expires_at IS NULL OR expires_at > ?) LIMIT 100',
-  ).bind(country, now).all();
-  return json(200, { coupons: (results || []).map(r => ({
-    id: r.id, store: r.store, code: r.code || undefined, title: r.title,
-    discountLabel: r.discount_label || '', country: r.country || undefined,
-    category: r.category || undefined, url: r.url || undefined, expiresAt: r.expires_at || undefined,
-  })) });
-}
-
-async function luxuryList(request, env, url) {
-  const country = (url.searchParams.get('country') || '').toUpperCase();
-  const now = nowIso();
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM luxury_offers WHERE (country IS NULL OR country = ?) AND (expires_at IS NULL OR expires_at > ?) LIMIT 100',
-  ).bind(country, now).all();
-  return json(200, { offers: (results || []).map(r => ({
-    id: r.id, brand: r.brand, title: r.title, kind: r.kind || 'deal',
-    discountLabel: r.discount_label || undefined, code: r.code || undefined, imageUrl: r.image_url || undefined,
-    url: r.url || undefined, country: r.country || undefined, category: r.category || undefined, expiresAt: r.expires_at || undefined,
-  })) });
-}
 
 // Human-verify: accept the token so abuse-prone submits can require it later.
 async function humanVerify(request, env) {
@@ -1182,14 +1138,11 @@ export default {
 
       if (post && p === '/jobs/submit') return jobSubmit(request, env);
       if (post && p === '/jobs/nearby') return jobsNearby(request, env);
-      if (post && p === '/ads/submit') return adSubmit(request, env);
       if (post && p === '/verification/start') return verificationStart(request, env);
       if (get && p === '/verification/status') return verificationStatus(request, env, url);
       if (post && p === '/influencers/submit') return influencerSubmit(request, env);
-      if (get && p === '/deals/coupons') return couponsList(request, env, url);
       if (get && p === '/pricematch/policies') return priceMatchPolicies(request, env, url);
       if (post && p === '/feedback/submit') return feedbackSubmit(request, env);
-      if (get && p === '/luxury/offers') return luxuryList(request, env, url);
       if (post && p === '/human/verify') return humanVerify(request, env);
 
       if (post && p === '/affiliate/click') return affiliateClick(request, env);

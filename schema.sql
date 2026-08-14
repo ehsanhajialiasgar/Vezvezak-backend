@@ -128,15 +128,14 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_geo ON jobs(latitude, longitude);
 
--- Merchant/influencer ads (submitted → AI-moderated → live). No adult ads.
-CREATE TABLE IF NOT EXISTS ads (
-  id TEXT PRIMARY KEY, user_id TEXT, title TEXT NOT NULL, body TEXT NOT NULL,
-  category TEXT, cta_url TEXT, phone TEXT, scope TEXT, is_adult INTEGER NOT NULL DEFAULT 0,
-  seller_type TEXT, country_code TEXT, latitude REAL, longitude REAL, luxury INTEGER NOT NULL DEFAULT 0,
-  moderation_status TEXT NOT NULL DEFAULT 'pending', submitted_at TEXT NOT NULL,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ads_geo ON ads(latitude, longitude);
+-- The advertising subsystem (ads / coupons / luxury offers) was REMOVED entirely
+-- (Ehsan 2026-08-13): a dormant paid-placement mechanism in a product whose central
+-- claim is that it does not sell placement. These DROPs retire the tables. They are
+-- deliberately NOT auto-run against production yet — the drops touch what was
+-- deployed, so they need separate approval before `wrangler d1 execute`.
+DROP TABLE IF EXISTS ads;
+DROP TABLE IF EXISTS coupons;
+DROP TABLE IF EXISTS luxury_offers;
 
 -- Verification requests (seller/influencer/advertiser). Doc review is manual.
 CREATE TABLE IF NOT EXISTS verifications (
@@ -155,15 +154,6 @@ CREATE TABLE IF NOT EXISTS influencers (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
--- Curated coupons + luxury offers (operator-seeded; GET reads live ones).
-CREATE TABLE IF NOT EXISTS coupons (
-  id TEXT PRIMARY KEY, store TEXT NOT NULL, code TEXT, title TEXT NOT NULL,
-  discount_label TEXT, country TEXT, category TEXT, url TEXT, expires_at TEXT
-);
-CREATE TABLE IF NOT EXISTS luxury_offers (
-  id TEXT PRIMARY KEY, brand TEXT NOT NULL, title TEXT NOT NULL, kind TEXT,
-  discount_label TEXT, code TEXT, image_url TEXT, url TEXT, country TEXT, category TEXT, expires_at TEXT
-);
 
 -- Commission attribution. A click is registered when the user taps through to a
 -- retailer; a conversion arrives later as a server-to-server postback from the

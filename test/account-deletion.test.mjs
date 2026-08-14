@@ -27,7 +27,7 @@ await t('both /account/export and /account/delete are routed', () => {
   assert.match(IDX, /p === '\/account\/delete'\) return accountDelete/);
 });
 await t('reviews, app_reviews and merchant listings are DELETED (full erasure)', () => {
-  for (const tbl of ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'ads', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches']) {
+  for (const tbl of ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches']) {
     assert.ok(new RegExp(`DELETE_BY_USER_ID = \\[[^\\]]*'${tbl}'`).test(IDX), `${tbl} must be in the delete list`);
   }
   assert.ok(!/UPDATE reviews SET user_id = NULL/.test(IDX), 'no anonymise path — full deletion today');
@@ -96,7 +96,6 @@ function seed(uid, identifier, tag) {
   db.prepare('INSERT INTO catalog_items (id,merchant_id,user_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run('cit_' + tag, 'mer_' + tag, uid, 'Item', 'live', iso, iso);
   db.prepare('INSERT INTO catalog_variants (id,item_id,merchant_id,price,created_at) VALUES (?,?,?,?,?)').run('var_' + tag, 'cit_' + tag, 'mer_' + tag, 9.99, iso);
   db.prepare('INSERT INTO jobs (id,user_id,title,business,status,submitted_at) VALUES (?,?,?,?,?,?)').run('job_' + tag, uid, 'Job', 'Biz', 'live', iso);
-  db.prepare('INSERT INTO ads (id,user_id,title,body,moderation_status,submitted_at) VALUES (?,?,?,?,?,?)').run('ad_' + tag, uid, 'Ad', 'Body', 'approved', iso);
   db.prepare('INSERT INTO influencers (id,user_id,name,handle,status,submitted_at) VALUES (?,?,?,?,?,?)').run('inf_' + tag, uid, 'Inf', '@h', 'live', iso);
   db.prepare('INSERT INTO verifications (id,user_id,kind,status,submitted_at) VALUES (?,?,?,?,?)').run('ver_' + tag, uid, 'seller', 'pending', iso);
   db.prepare('INSERT INTO feedback (id,user_id,kind,text,status,created_at) VALUES (?,?,?,?,?,?)').run('fb_' + tag, uid, 'bug', 'hi', 'new', iso);
