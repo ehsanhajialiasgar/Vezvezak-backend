@@ -320,3 +320,12 @@ CREATE TABLE IF NOT EXISTS telemetry (
   product_fingerprint TEXT                -- purchase.referred (non-reversible hash)
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_name_at ON telemetry (name, at);
+
+-- Translation cache (P0.5): GLOBAL and identifier-free. Keyed by sha256(source_lang || query) —
+-- the raw query is never stored, there is no user id and no IP. A query translation is a language
+-- fact, not private user content; this caches for latency/cost only (same rule as Places).
+CREATE TABLE IF NOT EXISTS translation_cache (
+  k          TEXT PRIMARY KEY,   -- sha256(source_lang || ' ' || query)
+  translated TEXT NOT NULL,
+  at         INTEGER NOT NULL
+);

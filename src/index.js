@@ -32,6 +32,7 @@ import {
   signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor,
 } from './lib.js';
 import { extractPublicPage } from './extract.js';
+import { translateQuery, cacheGet, cacheSet } from './translate.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
@@ -1095,6 +1096,33 @@ async function usageRecord(request, env) {
   return ok({ deprecated: true, note: 'recording moved to /search/consume' });
 }
 
+// POST /ai/normalize  {query, source}  ->  {ok, query}
+// Translate a non-Latin search query to English for matching. Called pre-auth from the hot path,
+// so it FAILS OPEN at every branch: bad input, no AI, over the daily ceiling, or any error returns
+// the RAW query with 200 — the search always proceeds. The client only calls this when its own
+// detectQueryHl found a non-Latin script, and it bounds the call at 400ms; this route re-validates.
+const NORMALIZE_DAILY_MAX = 20000; // GLOBAL safety ceiling (no per-user slot). Over it → raw query.
+async function aiNormalize(request, env) {
+  const body = (await readJson(request)) || {};
+  const query = typeof body.query === 'string' ? body.query.trim().slice(0, 200) : '';
+  const source = typeof body.source === 'string' ? body.source.toLowerCase().slice(0, 8) : '';
+  // Fail open on bad input or a missing model — never error a search, just hand back the raw query.
+  if (!query || !/^[a-z]{2,3}$/.test(source) || !env.AI) return ok({ query });
+
+  // Cache first: a hit costs nothing and does NOT touch the daily ceiling.
+  const hit = await cacheGet(env, query, source);
+  if (hit != null) return ok({ query: hit });
+
+  // Global daily safety ceiling — abuse/cost bound, not a per-user cap. Over it degrades to the
+  // raw query (fail open); it never blocks the search.
+  const gate = await rateLimit(env, 'ai:normalize', NORMALIZE_DAILY_MAX, 86_400_000);
+  if (!gate.allowed) return ok({ query });
+
+  const translated = await translateQuery(env, query, source);
+  await cacheSet(env, query, source, translated, Date.now());
+  return ok({ query: translated });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -1167,6 +1195,9 @@ export default {
       // Reads ONE public page (robots.txt-obeying, self-identifying) and returns
       // published prices with confidence + provenance. See extract.js.
       if (post && p === '/extract') return extractPublicPage(request, env);
+
+      // Translate a non-Latin search query to English for matching (Workers AI m2m100).
+      if (post && p === '/ai/normalize') return aiNormalize(request, env);
 
       return fail(404, 'Not found.');
     } catch (err) {
