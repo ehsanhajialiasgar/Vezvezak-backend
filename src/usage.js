@@ -18,7 +18,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const WEEKLY_CAPS = {
-  free: { local: 0,  online: 3   },
+  // free = ZERO billable calls, enforced HERE (the client showing 0 is not the
+  // guarantee — this table is). onlinePerWeek went 3→0 on 2026-08-23: even 3 live
+  // SerpApi calls/user/week breaks "free costs us nothing" at scale, and the free
+  // product path was already cache-only, so the 3 never actually fired. Client
+  // mirror: pricingStrategy.ts CONSUMER_TIERS free → onlinePerWeek 0. Change one,
+  // change both (weeklyCapClient.test.mjs / weeklyCaps.test.mjs fail on drift).
+  free: { local: 0,  online: 0   },
   pro:  { local: 18, online: 40  },
   max:  { local: 45, online: 100 },
 };

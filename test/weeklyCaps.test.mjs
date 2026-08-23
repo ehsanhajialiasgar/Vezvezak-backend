@@ -93,9 +93,11 @@ await t('a slot is stable for a given account', () => {
 });
 
 console.log('\n(d) NO free-tier path reaches Google Places or a billable AI call');
-await t('free has zero local (Google Places) slots', () => {
+await t('free has zero local (Google Places) AND zero online (SerpApi) slots', () => {
   assert.equal(WEEKLY_CAPS.free.local, 0);
   assert.equal(planCaps('free').local, 0);
+  assert.equal(WEEKLY_CAPS.free.online, 0, 'free is cache-only — zero live SerpApi slots (2026-08-23)');
+  assert.equal(planCaps('free').online, 0);
 });
 await t('billable AI is allowed for paid tiers ONLY', () => {
   assert.equal(billableAiAllowed('free'), false);

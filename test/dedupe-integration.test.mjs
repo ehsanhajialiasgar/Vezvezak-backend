@@ -101,12 +101,12 @@ await t('a photo for a made-up search id (no consumed slot) is refused', async (
   assert.equal(p.status, 402);
 });
 
-console.log('\nFree tier: zero local (Google Places), online allowed up to 3');
-await t('free local is always refused (cap 0); free online is allowed', async () => {
+console.log('\nFree tier: ZERO billable calls — local AND online both refused (cache-only, 2026-08-23)');
+await t('free is always refused BOTH kinds (local cap 0, online cap 0)', async () => {
   const l = await call(free, { kind: 'local', searchId: 'F1' });
   assert.equal(l.status, 402, 'free local must be refused — no Google Places');
-  const o = await call(free, { kind: 'online', searchId: 'F1' });
-  assert.equal(o.body.allowed, true, 'free online (SerpApi) is allowed within the cap');
+  const o = await call(free, { kind: 'online', searchId: 'F2' });
+  assert.equal(o.status, 402, 'free online must be refused too — no live SerpApi on free (cache-only)');
 });
 await t('unauthenticated consume is refused (401)', async () => {
   const r = await call(null, { kind: 'online', searchId: 'Z1' });
