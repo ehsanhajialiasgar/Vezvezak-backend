@@ -42,6 +42,17 @@ import {
 } from './usage.js';
 
 const OTP_TTL_MS = 10 * 60 * 1000;      // 10 minutes
+// OTP ceilings ABOVE the per-identifier 5/h. These are BUSINESS JUDGEMENTS, not
+// researched figures — real signup volume is ~0 today, so both sit far above any real
+// traffic while bounding a metered Resend flood. If anyone later calls these
+// "validated", that is the same error class as calling the confidence "calibrated" or
+// the luxury floor "researched". Revisit against real signup data when it exists.
+//   • per-IP 20/h  — a shared NAT (office/café) keeps headroom for a few real users +
+//     retries, while a single-IP flood is stopped even when the identifier is rotated.
+//   • global 500/day — the widest blast radius; a hard cost ceiling on Resend spend
+//     regardless of how the first two are evaded. Fails CLOSED like the other two.
+const OTP_PER_IP_HOURLY = 20;
+const OTP_GLOBAL_DAILY = 500;
 const OTP_MAX_ATTEMPTS = 5;
 const RESET_TTL_MS = 15 * 60 * 1000;
 
@@ -116,8 +127,30 @@ async function otpRequest(request, env) {
   if (!identifier) return fail(400, 'Enter a valid email address or phone number.');
   if (!['signup', 'signin', 'reset'].includes(purpose)) return fail(400, 'Invalid purpose.');
 
-  const rl = await rateLimit(env, `otp:${identifier}`, 5, 60 * 60 * 1000);
-  if (!rl.allowed) return fail(429, 'Too many codes requested. Please wait an hour.');
+  // THREE ceilings, each broader than the last, ALL fail CLOSED. Per-identifier alone
+  // was defeated by rotating the identifier (1.4 trace): a metered Resend email with no
+  // real ceiling. If we cannot EVALUATE a ceiling (DB unreachable), we refuse — missing
+  // data never allows, the same rule as the signed-out cap and enforcing(). Each trip
+  // returns a distinct reason so the client can tell the user which truth it is (1.13).
+  let ceilingRefusal;
+  try {
+    // global (widest) → per-IP → per-identifier (narrowest, existing). A rotating
+    // attacker passes the identifier check every time but is caught by IP then global.
+    const g = await rateLimit(env, 'otp:global', OTP_GLOBAL_DAILY, 24 * 60 * 60 * 1000);
+    if (!g.allowed) ceilingRefusal = fail(429, 'Verification is busy right now. Please try again later.', 'otp_rate_global');
+    else {
+      const ipk = await ipHash(request, env);
+      const ip = await rateLimit(env, `otpip:${ipk}`, OTP_PER_IP_HOURLY, 60 * 60 * 1000);
+      if (!ip.allowed) ceilingRefusal = fail(429, 'Too many codes from this network. Please wait an hour.', 'otp_rate_ip');
+      else {
+        const id = await rateLimit(env, `otp:${identifier}`, 5, 60 * 60 * 1000);
+        if (!id.allowed) ceilingRefusal = fail(429, 'Too many codes requested. Please wait an hour.', 'otp_rate_identifier');
+      }
+    }
+  } catch {
+    return fail(503, 'Verification is temporarily unavailable. Please try again shortly.', 'otp_unavailable');
+  }
+  if (ceilingRefusal) return ceilingRefusal;
 
   const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
   await env.DB.prepare(

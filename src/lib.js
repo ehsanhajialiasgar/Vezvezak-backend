@@ -19,7 +19,7 @@ export function json(status, body, extra = {}) {
   });
 }
 export const ok = (body = {}) => json(200, { ok: true, ...body });
-export const fail = (status, error) => json(status, { ok: false, error });
+export const fail = (status, error, reason) => json(status, { ok: false, error, ...(reason ? { reason } : {}) });
 
 // ── encoding ────────────────────────────────────────────────────────────────
 const enc = new TextEncoder();
