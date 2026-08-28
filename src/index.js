@@ -1156,6 +1156,60 @@ async function aiNormalize(request, env) {
   return ok({ query: translated });
 }
 
+// ── /ai/chat — STAGE 1: GROUNDED-IN-RESULTS ONLY (Ehsan 2026-08-27) ────────────
+// The assistant answers questions about the result set the user is looking at,
+// using ONLY the structured RESULT_CONTEXT the client computed. This endpoint is a
+// thin relay to Workers AI: the client owns the grounded system prompt and the
+// context; the client runs proseGuard on the reply. There is NO general chat and NO
+// app-support here — stages (b)/(c) are not built and this must not become them.
+//
+// OFF BY DEFAULT. It serves users only when AI_CHAT_ENABLED === '1' (a wrangler.toml
+// [vars] flag the founder flips ONLY after the per-conversation cost is measured and
+// a weekly cap sized inside the 35% margin — ledger 3.6). While the flag is unset the
+// route EXISTS (so the cost can be measured against a real invoice) but returns 503,
+// so no user reaches it and the client falls back. The ai-copilot + capability-claims
+// gates read this SAME flag, so adding this route does NOT stand them down by itself.
+const AI_CHAT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+const CANT_ANSWER = '[[CANT_ANSWER]]';
+const AI_CHAT_GLOBAL_DAILY = 20000;   // global safety ceiling (cost/abuse bound), per day
+const AI_CHAT_PER_IP_HOURLY = 60;     // per-IP hourly ceiling
+async function aiChat(request, env) {
+  if (env.AI_CHAT_ENABLED !== '1') return fail(503, 'AI chat is not enabled yet.', 'disabled');
+  if (!env.AI) return fail(503, 'AI chat is not available.', 'no_model');
+  const body = (await readJson(request)) || {};
+  const system = typeof body.system === 'string' ? body.system : '';
+  const context = body.context;                       // RESULT_CONTEXT (client-structured)
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const question = messages.filter(m => m && m.role === 'user').map(m => String(m.content || '')).pop() || '';
+  // Stage 1 is grounded-ONLY: without a context there is nothing to be grounded in,
+  // and without the grounded system prompt this is not stage 1 — refuse, never free-chat.
+  if (!system || !context || !question) return ok({ reply: CANT_ANSWER });
+  // Abuse ceilings — a PRE-AUTH route reaching a metered host (Workers AI) must be bounded
+  // BROADER than a per-identifier limit (there is none here to defeat). Both fail CLOSED:
+  // a GLOBAL daily bucket bounds cost, and a PER-IP hourly bucket stops one client draining
+  // it — so a rotated identifier cannot run up the model bill (preauthCeilings gate).
+  const g = await rateLimit(env, 'aichat:global', AI_CHAT_GLOBAL_DAILY, 24 * 60 * 60 * 1000);
+  if (!g.allowed) return fail(503, 'AI chat is busy right now. Please try again later.', 'rate_global');
+  const ipc = await rateLimit(env, `aichatip:${await ipHash(request, env)}`, AI_CHAT_PER_IP_HOURLY, 60 * 60 * 1000);
+  if (!ipc.allowed) return fail(429, 'Too many requests. Please slow down.', 'rate_ip');
+  try {
+    const r = await env.AI.run(AI_CHAT_MODEL, {
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `RESULT_CONTEXT:\n${JSON.stringify(context)}\n\nQuestion: ${question}` },
+      ],
+      max_tokens: 320,
+      temperature: 0.2,
+    });
+    const reply = String(r?.response || '').trim();
+    // usage is echoed for cost measurement (ledger 3.6); it carries no user data.
+    return ok({ reply: reply || CANT_ANSWER, usage: r?.usage || null });
+  } catch (e) {
+    console.error('ai/chat', e);
+    return fail(503, 'AI chat is temporarily unavailable.', 'model_error');
+  }
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -1231,6 +1285,9 @@ export default {
 
       // Translate a non-Latin search query to English for matching (Workers AI m2m100).
       if (post && p === '/ai/normalize') return aiNormalize(request, env);
+
+      // STAGE 1 grounded results-explainer. OFF (503) until AI_CHAT_ENABLED === '1'.
+      if (post && p === '/ai/chat') return aiChat(request, env);
 
       return fail(404, 'Not found.');
     } catch (err) {
