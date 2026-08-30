@@ -1131,14 +1131,25 @@ async function usageRecord(request, env) {
 
 // POST /ai/normalize  {query, source}  ->  {ok, query}
 // Translate a non-Latin search query to English for matching. Called pre-auth from the hot path,
-// so it FAILS OPEN at every branch: bad input, no AI, over the daily ceiling, or any error returns
-// the RAW query with 200 — the search always proceeds. The client only calls this when its own
-// detectQueryHl found a non-Latin script, and it bounds the call at 400ms; this route re-validates.
+// so it FAILS OPEN at every branch: OFF-flag, bad input, no AI, over the daily ceiling, or any
+// error returns the RAW query with 200 — the search always proceeds. The client only calls this
+// when its own detectQueryHl found a non-Latin script, and it bounds the call at 400ms.
+//
+// FLAG-GATED like /ai/chat (Ehsan 2026-08-30). This route sends the search query to Workers AI
+// (@cf/meta/m2m100-1.2b), so the DEPLOY STATE must NOT be what decides whether it leaves — with only
+// the `!env.AI` check below, one bare `wrangler deploy` would start sending query text to a language
+// model and make privacy §6 false, with no code change and no decision by anyone. OFF unless
+// AI_NORMALIZE_ENABLED === '1' (default "0" in wrangler.toml); flipping it on is a committed,
+// reviewable change, and the BUILT-HELD note in translate.js still says re-run the live harness first.
+// When off it fails CLOSED on egress: the raw query goes back and env.AI / translateQuery are never
+// reached. The check sits FIRST so nothing downstream can touch the model.
 const NORMALIZE_DAILY_MAX = 20000; // GLOBAL safety ceiling (no per-user slot). Over it → raw query.
 async function aiNormalize(request, env) {
   const body = (await readJson(request)) || {};
   const query = typeof body.query === 'string' ? body.query.trim().slice(0, 200) : '';
   const source = typeof body.source === 'string' ? body.source.toLowerCase().slice(0, 8) : '';
+  // FLAG GATE (fail CLOSED on egress) — the model is unreachable unless explicitly enabled.
+  if (env.AI_NORMALIZE_ENABLED !== '1') return ok({ query });
   // Fail open on bad input or a missing model — never error a search, just hand back the raw query.
   if (!query || !/^[a-z]{2,3}$/.test(source) || !env.AI) return ok({ query });
 

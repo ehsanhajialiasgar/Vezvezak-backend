@@ -34,3 +34,9 @@ enabled = false
 # Non-secret vars:
 [vars]
 MAIL_FROM = "Vezvezak <noreply@vezvezak.com>"
+# AI FEATURE FLAG — DEFAULT OFF, fail-closed. /ai/normalize sends the search query to Workers AI
+# (@cf/meta/m2m100-1.2b). Keeping this "0" is what keeps privacy §6 ("no data to any AI provider
+# today") true — a route stays dark until the flag is flipped HERE, a committed + reviewable change,
+# never by a bare `wrangler deploy`. Re-run the live translation harness (see src/translate.js,
+# BUILT-HELD) before ever setting it to "1".
+AI_NORMALIZE_ENABLED = "0"
