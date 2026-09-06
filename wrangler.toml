@@ -40,3 +40,13 @@ MAIL_FROM = "Vezvezak <noreply@vezvezak.com>"
 # never by a bare `wrangler deploy`. Re-run the live translation harness (see src/translate.js,
 # BUILT-HELD) before ever setting it to "1".
 AI_NORMALIZE_ENABLED = "0"
+# MODERATION FLAG — DEFAULT OFF, fail-closed. moderateReview() and moderateCatalogItem() send an app
+# review's text, or a listing's title/description/brand/model, to Workers AI
+# (@cf/meta/llama-3.3-70b-instruct-fp8-fast). Until 2026-09-03 the ONLY thing holding privacy §5
+# ("it does not run for any user today — no review or listing text is sent to any model") was the plan
+# gate below it: `pro || max`. That made a PUBLISHED LEGAL SENTENCE depend on a row in user_plans, so
+# the first redeemed comp code would have falsified it with no code change, no deploy, and no gate
+# firing. The flag sits ABOVE the plan gate — BOTH conditions, neither replaces the other — so the
+# sentence is now true because of the code and stays true when the first account becomes paid.
+# Flipping this to "1" is a committed, reviewable change and REQUIRES updating §5 first.
+MODERATION_ENABLED = "0"

@@ -420,6 +420,10 @@ export async function moderateReview(env, stars, text, plan) {
   // ZERO free-tier billable AI (Ehsan 2026-08-13): a free/anonymous submission is
   // stored unmoderated and never reaches env.AI. Fail-closed reward gate is
   // unchanged — unmoderated ⇒ not approved ⇒ no reward, no public wall.
+  // FLAG GATE (fail CLOSED), above the plan gate — see MODERATION_ENABLED in wrangler.toml. Two
+  // conditions, not one replacing the other: the flag decides whether the feature exists at all, the
+  // plan gate decides who pays for it. A published legal sentence must not rest on a database row.
+  if (env.MODERATION_ENABLED !== '1') return { approved: false, byModel: false, note: 'awaiting_moderation' };
   if (!billableAiAllowed(plan)) return { approved: false, byModel: false, note: 'awaiting_moderation' };
 
   const words = text.split(/\s+/).filter(Boolean);
@@ -761,6 +765,9 @@ export async function moderateCatalogItem(env, it, plan) {
   // Free (and anonymous) sellers never trigger a synchronous billable AI call —
   // the item is stored 'pending' for batch review. Paid tiers get live AI
   // moderation. Deterministic prohibited-screen above still runs for everyone.
+  // FLAG GATE (fail CLOSED), above the plan gate — same reasoning as moderateReview. The deterministic
+  // prohibited-screen above stays unconditional: it runs ON OUR SERVER and sends nothing anywhere.
+  if (env.MODERATION_ENABLED !== '1') return 'pending';
   if (!billableAiAllowed(plan)) return 'pending';
   if (!env.AI) return 'pending';
   try {

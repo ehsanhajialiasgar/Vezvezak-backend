@@ -112,11 +112,30 @@ await t('moderateReview never touches env.AI on a free plan', async () => {
   assert.equal(v.byModel, false);
   assert.equal(v.note, 'awaiting_moderation');
 });
-await t('moderateReview DOES moderate on a paid plan', async () => {
-  const yes = { AI: { run: async () => ({ response: 'YES' }) } };
+// TWO-CONDITION CONTRACT (Ehsan 2026-09-03). This assertion was 'moderateReview DOES moderate on a
+// paid plan' and had been GREEN SINCE 2026-08-13 — green for the WRONG REASON. It recorded
+// "paid ⇒ moderated" as an invariant, and that invariant IS the defect: it is exactly what made the
+// published privacy §5 ("no review or listing text is sent to any model today") depend on a row in
+// user_plans rather than on a code path. A test that documents a bug protects nothing. Both
+// directions are now pinned, so this asserts strictly MORE than the line it replaces.
+await t('flag OFF: a PAID plan is still NOT moderated — the flag holds §5, not the plan gate', async () => {
+  const trap = { MODERATION_ENABLED: '0', AI: { run: () => { throw new Error('env.AI CALLED with the flag off'); } } };
+  const v = await moderateReview(trap, 5, 'a genuine and specific review of this product', 'pro');
+  assert.equal(v.approved, false);
+  assert.equal(v.byModel, false);
+  assert.equal(v.note, 'awaiting_moderation');
+});
+await t('flag ON + paid plan: moderation runs (the feature is not dead, only held)', async () => {
+  const yes = { MODERATION_ENABLED: '1', AI: { run: async () => ({ response: 'YES' }) } };
   const v = await moderateReview(yes, 5, 'a genuine and specific review of this product', 'pro');
   assert.equal(v.approved, true);
   assert.equal(v.byModel, true);
+});
+await t('flag ON + FREE plan: still not moderated — the plan gate survives underneath the flag', async () => {
+  const trap = { MODERATION_ENABLED: '1', AI: { run: () => { throw new Error('env.AI CALLED for a free user'); } } };
+  const v = await moderateReview(trap, 5, 'a genuine and specific review of this product', 'free');
+  assert.equal(v.byModel, false);
+  assert.equal(v.note, 'awaiting_moderation');
 });
 await t('moderateCatalogItem never touches env.AI on a free plan', async () => {
   const trap = { AI: { run: () => { throw new Error('env.AI CALLED for a free user'); } } };
