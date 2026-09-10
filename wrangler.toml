@@ -50,3 +50,13 @@ AI_NORMALIZE_ENABLED = "0"
 # sentence is now true because of the code and stays true when the first account becomes paid.
 # Flipping this to "1" is a committed, reviewable change and REQUIRES updating §5 first.
 MODERATION_ENABLED = "0"
+# AFFILIATE FLAG — DEFAULT OFF, fail-closed. Two routes WRITE the affiliate tables:
+# /affiliate/click inserts into affiliate_clicks (unauthenticated, IP-rate-limited, device id
+# hashed — not an injection or a PII leak, but a WRITABLE SURFACE NOTHING IN OUR PRODUCT REACHES),
+# and /affiliate/postback inserts into conversions, which IS the commission record. Until
+# 2026-09-10 the only thing keeping those tables empty was that the app never called them: the
+# CLIENT was gated on affiliateActive() and the server accepted whatever arrived. That made
+# privacy §11 a claim about our app rather than about our server. With this flag the claim moves
+# from "our app cannot produce one" to "the server will not accept one".
+# Flipping this to "1" is a committed, reviewable change and REQUIRES updating privacy §11 first.
+AFFILIATE_ENABLED = "0"

@@ -676,6 +676,12 @@ async function humanVerify(request, env) {
 // Register a tap-through so a later conversion postback can be matched to it.
 // Anonymous by design: `deviceId` (if sent) is one-way hashed, never stored raw.
 async function affiliateClick(request, env) {
+  // FLAG GATE (fail CLOSED), above everything — see AFFILIATE_ENABLED in wrangler.toml. This route
+  // is unauthenticated by design (a click beacon that required sign-in would change the affiliate
+  // design, not gate it), so the flag is what makes privacy §11 a claim about the SERVER rather
+  // than about which client happens to call. No flag ⇒ no row, before validation, before the
+  // rate-limit counter, before anything is read from the body.
+  if (env.AFFILIATE_ENABLED !== '1') return fail(503, 'Affiliate tracking is not enabled.', 'affiliate_disabled');
   const b = await readJson(request);
   if (!b || !b.clickId) return fail(400, 'Missing clickId.');
   const rl = await rateLimit(env, `affclick:${await ipHash(request, env)}`, 120, 60 * 60 * 1000);
@@ -696,6 +702,10 @@ async function affiliateClick(request, env) {
 // by shared secret (FAILS CLOSED), idempotent per (network, orderId). We only
 // RECORD the sale/commission — money is settled by the network, never by us.
 async function affiliatePostback(request, env, url) {
+  // FLAG GATE (fail CLOSED), ABOVE the secret check. conversions IS the commission record §11
+  // speaks about, so gating only /affiliate/click would leave the other half of the sentence
+  // resting on nobody holding the postback secret — a secret is a lock, not an absence.
+  if (env.AFFILIATE_ENABLED !== '1') return fail(503, 'Affiliate tracking is not enabled.', 'affiliate_disabled');
   const provided = url.searchParams.get('token') || request.headers.get('x-vez-postback') || '';
   if (!verifyPostbackSecret(provided, env.AFFILIATE_POSTBACK_SECRET)) {
     // 503 when unconfigured vs 401 when the token is wrong — but both reject.
