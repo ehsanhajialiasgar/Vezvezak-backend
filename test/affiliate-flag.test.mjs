@@ -70,11 +70,27 @@ t('wrangler.toml declares AFFILIATE_ENABLED and DEFAULTS IT OFF — flipping it 
   const m = TOML.match(/AFFILIATE_ENABLED\s*=\s*"([^"]*)"/);
   assert.ok(m, 'AFFILIATE_ENABLED must be declared in wrangler.toml [vars]');
   assert.notEqual(m[1], '1',
-    'AFFILIATE_ENABLED must not be committed as "1". PRIVACY POLICY §11 MUST BE UPDATED FIRST: it currently ' +
-    'states the server will not accept a purchase-referral or commission record. Flipping this flag makes that ' +
-    'sentence false the moment it deploys — with no other code change and no other gate firing. Update §11, ' +
-    'publish it, verify live == repo, and only then flip the flag. The FTC disclosures are a SEPARATE condition ' +
-    'held by affiliate-disclosure-gate in the app repo, keyed on an id being filled in src/services/affiliate.ts.');
+    'AFFILIATE_ENABLED must not be committed as "1".\n' +
+    '\n' +
+    'ONE RULE: THE WORLD MUST NEVER BE MORE PERMISSIVE THAN THE PAGE SAYS.\n' +
+    'It runs in opposite orders depending on which way you are moving, and adding a refusal is\n' +
+    'not the same move as removing one:\n' +
+    '\n' +
+    '  LOOSENING the world (this failure — flipping the flag 0 -> 1, so the server starts\n' +
+    '  accepting purchase-referral and commission records): THE PAGE LOOSENS FIRST. Privacy §11\n' +
+    '  currently states the server will NOT accept one. Update §11, publish it, verify live == repo,\n' +
+    '  and only then flip this flag and deploy. Deploying first makes a published legal sentence\n' +
+    '  false the moment it lands, with no other code change and no other gate firing.\n' +
+    '\n' +
+    '  TIGHTENING the world (adding a refusal, as this flag itself did on 2026-09-10): THE PAGE\n' +
+    '  FOLLOWS. Deploy the worker first, then publish the page. In between, the page understates\n' +
+    '  our protection — it claims less than the server does — which is inaccurate but never a claim\n' +
+    '  to a safety we lack.\n' +
+    '\n' +
+    'SEPARATE CONDITION, do not confuse it with this one: the FTC disclosures are held by\n' +
+    'affiliate-disclosure-gate in the app repo, keyed on an id being filled in src/services/affiliate.ts.\n' +
+    'The material connection exists if and only if an id is filled; this flag governs whether our\n' +
+    'SERVER records anything. Different units, deliberately.');
 });
 
 console.log(`\naffiliate flag gate: ${passed}/6 checks passed`);
