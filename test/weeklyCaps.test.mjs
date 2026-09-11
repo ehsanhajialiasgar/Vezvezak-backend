@@ -142,9 +142,23 @@ await t('moderateCatalogItem never touches env.AI on a free plan', async () => {
   const status = await moderateCatalogItem(trap, { title: 'Blue Widget', description: 'a nice blue widget', brand: 'Acme', model: 'X1' }, 'free');
   assert.equal(status, 'pending');
 });
-await t('extract refuses a free plan BEFORE any fetch/AI (source)', () => {
+// /extract was DELETED 2026-09-11 (7.5, dead-code gate): a spend-capable handler that HAD a caller
+// (the route dispatch) and that NO USER PATH REACHED — zero client references in the whole app.
+// This assertion used to check that the handler gated on plan. There is no handler, so the check
+// now asserts something STRICTLY STRONGER: extract.js can no longer reach a paid model at all, and
+// no route serves it. A gate on a plan is weaker than the absence of the spend path.
+await t('extract.js can no longer reach a paid model, and /extract is not served', () => {
   const s = SRC('extract.js');
-  assert.match(s, /billableAiAllowed\(await planFor\(env, claims\.sub\)\)/, 'extract must gate on plan');
+  assert.doesNotMatch(s.replace(/\/\/.*$/gm, ''), /env\.AI/, 'extract.js must contain no env.AI path');
+  assert.doesNotMatch(s.replace(/\/\/.*$/gm, ''), /extractPublicPage/, 'the handler must be gone, not merely unrouted');
+  const idx = SRC('index.js').replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(idx, /p === '\/extract'/, 'no route may serve /extract');
+  assert.doesNotMatch(idx, /extractPublicPage/, 'index.js must not import or call the deleted handler');
+  // and the library it wrapped must SURVIVE — deleting a tested guard because its caller went is
+  // the opposite error. These are the substance of ledger 3.1 Part 3.
+  for (const keep of ['isAllowedByRobots', 'blockedReason', 'pageToText', 'extractJsonLd']) {
+    assert.match(s, new RegExp(`export function ${keep}\\b`), `${keep} must still be exported`);
+  }
 });
 await t('only local|online are metered — accessibility (voice.*) is never counted', () => {
   assert.ok(METERED_KINDS.has('local') && METERED_KINDS.has('online'));

@@ -31,7 +31,6 @@ import {
   CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword,
   signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor,
 } from './lib.js';
-import { extractPublicPage } from './extract.js';
 import { translateQuery, cacheGet, cacheSet } from './translate.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
@@ -1309,7 +1308,8 @@ export default {
 
       // Reads ONE public page (robots.txt-obeying, self-identifying) and returns
       // published prices with confidence + provenance. See extract.js.
-      if (post && p === '/extract') return extractPublicPage(request, env);
+      // /extract DELETED 2026-09-11 (7.5): a spend-capable handler with a caller and no user
+      // path. The extraction library it wrapped is intact in extract.js for ledger 3.1 Part 3.
 
       // Translate a non-Latin search query to English for matching (Workers AI m2m100).
       if (post && p === '/ai/normalize') return aiNormalize(request, env);

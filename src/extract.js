@@ -274,159 +274,21 @@ export function blockedReason(u) {
   return null;
 }
 
-// Fetch with redirects followed MANUALLY, re-validating each hop against
-// blockedReason so a public URL cannot 302 us onto an internal address. Returns a
-// uniform shape; callers must NOT leak the distinction between failure kinds.
-async function fetchWithGuard(startUrl, signal) {
-  let url = startUrl;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    let u;
-    try { u = new URL(url); } catch { return { ok: false, why: 'bad_url' }; }
-    const blocked = blockedReason(u);
-    if (blocked) return { ok: false, why: `blocked_${blocked}` };
-    const res = await fetch(u.href, { headers: { 'User-Agent': UA, Accept: 'text/html,text/plain,*/*' }, signal, redirect: 'manual' });
-    if (res.status >= 300 && res.status < 400) {
-      const loc = res.headers.get('location');
-      if (!loc) return { ok: false, why: `http_${res.status}` };
-      url = new URL(loc, u.href).href;                   // resolve relative, re-check next loop
-      continue;
-    }
-    if (!res.ok) return { ok: false, why: `http_${res.status}` };
-    const len = parseInt(res.headers.get('content-length') || '0', 10);
-    if (len > MAX_BYTES) return { ok: false, why: 'too_large' };
-    return { ok: true, text: (await res.text()).slice(0, MAX_BYTES), finalUrl: res.url || u.href };
-  }
-  return { ok: false, why: 'too_many_redirects' };
-}
-
-/**
- * Read one PUBLIC page and return normalized offers with confidence + provenance.
- *
- * POST /extract { url }
- *  -> { ok, allowed, offers:[{name,price,currency,confidence,method}], source, fetchedAt, unsure? }
- */
-export async function extractPublicPage(request, env) {
-  // Authenticated only (Ehsan 2026-08-11). No app flow calls /extract today, so
-  // requiring a session breaks nothing, and it stops this being an OPEN
-  // unauthenticated server-side fetcher. A future unauthenticated use would be a
-  // deliberate decision to revisit — not a silent default.
-  const claims = await requireAuth(request, env);
-  if (!claims) return fail(401, 'Sign in to use this.');
-
-  // Paid-only: /extract runs a billable page fetch + AI read. The free tier must
-  // incur zero billable AI (Ehsan 2026-08-13), so refuse a free plan BEFORE any
-  // fetch or env.AI call. Refusal is a distinct, honest code (not the generic
-  // unavailable() oracle) because tier is the caller's own account state.
-  if (!billableAiAllowed(await planFor(env, claims.sub))) return fail(402, 'This feature requires a paid plan.');
-
-  const body = await readJson(request);
-  if (!body?.url) return fail(400, 'A url is required.');
-  let target;
-  try { target = new URL(String(body.url)); } catch { return fail(400, 'That is not a valid URL.'); }
-
-  // Every fetch OUTCOME failure — bad scheme/port, internal address, HTTP status,
-  // timeout, robots-disallowed, too many redirects — collapses to ONE generic
-  // response, so a caller cannot use /extract as an oracle for what is reachable.
-  // The real reason stays server-side (surfaced only via `wrangler tail`, never
-  // stored while observability is off), never in the body.
-  const unavailable = (why) => {
-    if (why) console.warn(`extract unavailable: ${why} :: ${target.href}`);
-    return json(200, { ok: true, offers: [], source: target.href, fetchedAt: nowIso(), unavailable: true });
-  };
-
-  // Rate limits: per-host, per-authenticated-USER (not IP), and a GLOBAL cap that is
-  // independent of any single caller — the backstop against IP-rotating abuse.
-  if (!(await rateLimit(env, 'extract:global', GLOBAL_PER_MIN, 60_000)).allowed) return unavailable('global_rate');
-  if (!(await rateLimit(env, `extract:${await sha256(target.hostname)}`, 20, 60_000)).allowed) return unavailable('host_rate');
-  if (!(await rateLimit(env, `extractuser:${claims.sub}`, 30, 60_000)).allowed) return unavailable('user_rate');
-
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
-  try {
-    // 1) robots.txt is a rule, not a suggestion (fetched through the same guard).
-    const robots = await fetchWithGuard(`${target.origin}/robots.txt`, ac.signal).catch(() => ({ ok: false }));
-    if (robots.ok && !isAllowedByRobots(robots.text, target.pathname)) return unavailable('robots_disallowed');
-
-    // 2) Fetch the public page — redirects followed manually and re-validated per hop.
-    const page = await fetchWithGuard(target.href, ac.signal);
-    if (!page.ok) return unavailable(page.why);
-
-    // 3) Structured data first — exact, published to be machine-read, no guessing.
-    //    Try every open standard a cooperative site might use, in order of fidelity:
-    //    JSON-LD → Microdata → Open Graph product meta.
-    const structured =
-      extractJsonLd(page.text).map(o => ({ ...o, method: 'schema.org/json-ld' }));
-    if (!structured.length) structured.push(...extractMicrodata(page.text).map(o => ({ ...o, method: 'schema.org/microdata' })));
-    if (!structured.length) structured.push(...extractOpenGraph(page.text).map(o => ({ ...o, method: 'opengraph' })));
-
-    if (structured.length) {
-      // Dedupe across formats (a page can carry the same price in two of them).
-      const seen = new Set();
-      const offers = structured.filter(o => {
-        const k = `${(o.name || '').toLowerCase()}|${o.price}|${o.currency || ''}`;
-        if (seen.has(k)) return false; seen.add(k); return true;
-      });
-      return json(200, {
-        ok: true, allowed: true, source: page.finalUrl || target.href, fetchedAt: nowIso(),
-        offers: offers.slice(0, 25).map(o => ({ ...o, confidence: 0.92 })),
-      });
-    }
-
-    // 4) Semantic fallback — layouts differ, so we ask the model to read the
-    //    visible text. It is instructed to return NOTHING rather than guess.
-    if (!env.AI) {
-      return json(200, { ok: true, allowed: true, offers: [], source: page.finalUrl || target.href, fetchedAt: nowIso(), unsure: true });
-    }
-    // COST CEILING: the model fallback is the ONLY billable path. A global daily
-    // ceiling — independent of any single caller or IP — caps denial-of-wallet
-    // abuse. When it is hit we return unavailable and NEVER reach inference.
-    if (!(await rateLimit(env, 'extract:ai', AI_DAILY_CEILING, 86_400_000)).allowed) return unavailable('ai_daily_ceiling');
-    const text = pageToText(page.text);
-    const r = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You extract published prices from the visible text of a business web page. ' +
-            'Return ONLY compact JSON: {"offers":[{"name":"...","price":0,"currency":"USD","confidence":0.0}]}. ' +
-            'confidence is YOUR certainty 0-1 that this is a real, current, published price for that named item. ' +
-            'If the page shows no clear price, return {"offers":[]}. ' +
-            'NEVER invent, estimate, average or infer a price. It is correct and expected to return an empty list. ' +
-            'A wrong price is far worse than no price.',
-        },
-        { role: 'user', content: text },
-      ],
-      max_tokens: 700,
-    });
-
-    let offers = [];
-    try {
-      const m = String(r?.response || '').match(/\{[\s\S]*\}/);
-      const parsed = m ? JSON.parse(m[0]) : { offers: [] };
-      offers = (parsed.offers || [])
-        .filter(o => Number.isFinite(Number(o.price)) && Number(o.price) > 0)
-        .map(o => ({
-          name: String(o.name || '').slice(0, 200) || undefined,
-          price: Number(o.price),
-          currency: o.currency || undefined,
-          confidence: Math.max(0, Math.min(1, Number(o.confidence) || 0)),
-          method: 'ai',
-        }))
-        // The whole point: refuse rather than mislead.
-        .filter(o => o.confidence >= CONFIDENCE_THRESHOLD)
-        .slice(0, 25);
-    } catch { offers = []; }
-
-    return json(200, {
-      ok: true, allowed: true, source: page.finalUrl || target.href, fetchedAt: nowIso(),
-      offers,
-      unsure: offers.length === 0,
-    });
-  } catch (err) {
-    // Any exception (incl. the fetch timeout abort) collapses to the same generic
-    // response — no timing/error oracle.
-    return unavailable('exception');
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// ── THE ROUTE AND ITS PLUMBING WERE DELETED 2026-09-11 (7.5, dead-code gate) ────────────────
+// `extractPublicPage` was a SPEND-CAPABLE function (env.AI.run) that HAD a caller — the route
+// dispatch in index.js — and that NO USER PATH REACHED: /extract had zero client references in
+// the whole app. That is the exact shape 7.5 exists to forbid, and a caller-count rule would have
+// been green on it. Deleting it lets the dead-code gate ship with an EMPTY exemption registry,
+// which is strictly stronger than a registry with one entry and a mechanism nobody exercises.
+//
+// WHAT STAYED, and why: everything above this line. The parsers and BOTH guards
+// (isAllowedByRobots, blockedReason) are tested and are the substance of ledger 3.1 Part 3 — the
+// merchant extract bridge. Deleting a working, tested guard because its caller went is the
+// opposite error, so they stay.
+//
+// WHAT WENT WITH IT: `fetchWithGuard`, an UNTESTED 20-line wrapper whose only two callers were
+// inside the handler. Its one non-obvious property is recorded in the ledger rather than kept as
+// dead code: it followed redirects MANUALLY and re-ran blockedReason on EVERY hop, so a public URL
+// could not 302 onto an internal address. blockedReason — the hard half, the IP/CIDR logic — is
+// still here and still tested; the per-hop re-check is a three-line requirement the bridge must
+// re-implement deliberately, not a subtlety anyone has to rediscover.
