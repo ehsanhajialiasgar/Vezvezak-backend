@@ -29,6 +29,8 @@ jobs:
           if grep -Eq "\[observability\][^[]*enabled[[:space:]]*=[[:space:]]*true" wrangler.toml; then
             echo "✗ [observability] enabled = true — request logging would turn on"; exit 1; fi
           echo "✓ observability declared off"
+      - name: workflow syntax (YAML + the shell inside every run: block)
+        run: ruby scripts/workflow-syntax-gate.rb
       - name: backend logic tests
         run: for t in test/*.test.mjs; do node "$t"; done
       - name: wrangler dry-run (validate bundle + bindings, NO deploy)
