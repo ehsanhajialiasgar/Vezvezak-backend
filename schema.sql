@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS user_plans (
   source                  TEXT,   -- 'apple' | 'comp' — who granted it
   original_transaction_id TEXT,   -- Apple's; one subscription binds to ONE account (replay guard)
   environment             TEXT,   -- 'Production' | 'Sandbox'
+  comp_redeemed           TEXT,   -- comma-separated SHA-256 of comp codes this account redeemed (one code, once)
   updated_at              TEXT
 );
 

@@ -33,6 +33,7 @@ import {
 } from './lib.js';
 import { translateQuery, cacheGet, cacheSet } from './translate.js';
 import { iapValidate } from './iap.js';
+import { compRedeem } from './comp.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
@@ -333,7 +334,7 @@ export async function accountExport(request, env) {
     verifications: await q('SELECT id, kind, company_name, is_company, status, submitted_at FROM verifications WHERE user_id = ?'),
     feedback: await q('SELECT id, kind, text, status, created_at FROM feedback WHERE user_id = ?'),
     referralCode: await q('SELECT code, created_at FROM referral_codes WHERE user_id = ?'),
-    plan: await q('SELECT plan, expires_at, source, environment, updated_at FROM user_plans WHERE user_id = ?'),
+    plan: await q('SELECT plan, expires_at, source, environment, comp_redeemed, updated_at FROM user_plans WHERE user_id = ?'),
     usage: await q('SELECT local_used, online_used, window_start FROM weekly_search_usage WHERE user_id = ?'),
   };
   return ok({ export: data });
@@ -1299,6 +1300,7 @@ export default {
       if (post && p === '/usage/status') return usageStatus(request, env);
       // Deprecated advisory shims (removed in the Part 2 client migration).
       if (post && p === '/iap/validate') return iapValidate(request, env);
+      if (post && p === '/comp/redeem') return compRedeem(request, env);
       if (post && p === '/usage/check') return usageCheck(request, env);
       if (post && p === '/usage/record') return usageRecord(request, env);
 

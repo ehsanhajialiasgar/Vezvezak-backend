@@ -8,4 +8,5 @@ ALTER TABLE user_plans ADD COLUMN expires_at TEXT;
 ALTER TABLE user_plans ADD COLUMN source TEXT;
 ALTER TABLE user_plans ADD COLUMN original_transaction_id TEXT;
 ALTER TABLE user_plans ADD COLUMN environment TEXT;
+ALTER TABLE user_plans ADD COLUMN comp_redeemed TEXT;   -- step 6: hashes of comp codes redeemed by this account
 CREATE INDEX IF NOT EXISTS idx_user_plans_original_tx ON user_plans(original_transaction_id);
