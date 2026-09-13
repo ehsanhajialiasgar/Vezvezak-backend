@@ -255,9 +255,13 @@ CREATE TABLE IF NOT EXISTS price_match_policies (
 -- user_plans is written by IAP receipt validation (owner-side); defaults to
 -- 'free' when absent, so the server ALWAYS enforces free limits authoritatively.
 CREATE TABLE IF NOT EXISTS user_plans (
-  user_id    TEXT PRIMARY KEY,
-  plan       TEXT NOT NULL DEFAULT 'free',   -- 'free' | 'pro' | 'max' | 'max20x'
-  updated_at TEXT
+  user_id                 TEXT PRIMARY KEY,
+  plan                    TEXT NOT NULL DEFAULT 'free',   -- 'free' | 'pro' | 'max' | 'max20x'
+  expires_at              TEXT,   -- ISO; a PAID row with no or past expiry resolves to free (planFor)
+  source                  TEXT,   -- 'apple' | 'comp' — who granted it
+  original_transaction_id TEXT,   -- Apple's; one subscription binds to ONE account (replay guard)
+  environment             TEXT,   -- 'Production' | 'Sandbox'
+  updated_at              TEXT
 );
 
 -- weekly_search_usage — the server-authoritative WEEKLY CAP counters (Ehsan

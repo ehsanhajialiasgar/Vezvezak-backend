@@ -39,7 +39,15 @@ function makeD1(database) {
 
 const env = { DB: makeD1(db), JWT_SECRET: 'test-secret' };
 const iso = new Date().toISOString();
-db.prepare('INSERT INTO user_plans (user_id, plan, updated_at) VALUES (?,?,?)').run('usr_pro', 'pro', iso);
+// A PAID ROW NOW NEEDS A FUTURE EXPIRY (ledger 1.2, fixed 2026-09-14). This fixture used to insert
+// ('usr_pro', 'pro') with no expiry, and it went RED the moment planFor() started refusing paid rows without
+// one — correctly: a paid plan with no expiry is exactly the never-expiring plan 1.2 described. The fixture
+// recorded the defect as a normal Pro user. It now carries a real expiry, and a second, EXPIRED Pro user is
+// added so the rule is asserted behaviourally against the real schema, not only in iap.test.mjs's fake DB.
+const future = new Date(Date.now() + 30 * 86_400_000).toISOString();
+const past = new Date(Date.now() - 86_400_000).toISOString();
+db.prepare('INSERT INTO user_plans (user_id, plan, expires_at, source, updated_at) VALUES (?,?,?,?,?)').run('usr_pro', 'pro', future, 'apple', iso);
+db.prepare('INSERT INTO user_plans (user_id, plan, expires_at, source, updated_at) VALUES (?,?,?,?,?)').run('usr_pro_expired', 'pro', past, 'apple', iso);
 db.prepare('INSERT INTO user_plans (user_id, plan, updated_at) VALUES (?,?,?)').run('usr_free', 'free', iso);
 
 async function call(token, body) {
@@ -57,6 +65,13 @@ const t = async (n, fn) => { try { await fn(); console.log('  ✅', n); pass++; 
 
 const pro = await signJwt({ sub: 'usr_pro', identifier: 'x' }, env.JWT_SECRET);
 const free = await signJwt({ sub: 'usr_free', identifier: 'y' }, env.JWT_SECRET);
+const expiredPro = await signJwt({ sub: 'usr_pro_expired', identifier: 'z' }, env.JWT_SECRET);
+
+await t('an EXPIRED Pro subscription gets FREE caps — refused a local slot, against the real schema', async () => {
+  const r = await call(expiredPro, { kind: 'local', vz_sid: 'sid-expired-1' });
+  assert.notEqual(r.status, 200, `an expired Pro plan must not consume a paid slot (got ${r.status})`);
+  assert.equal(localUsed('usr_pro_expired'), 0, 'nothing may be counted against a plan that has expired');
+});
 
 console.log('\nOne search bundle collapses into ONE slot (Text + Nearby share a vz_sid)');
 await t('two sub-calls of the same vz_sid consume exactly one local slot', async () => {
