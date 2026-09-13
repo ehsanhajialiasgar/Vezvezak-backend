@@ -1,4 +1,4 @@
-// IN-APP PURCHASE VALIDATION — launch chain step 5 (Ehsan 2026-09-14).
+// IN-APP PURCHASE VALIDATION — launch chain step 5 (Ehsan 2026-09-13).
 //
 // Until today this did not exist, and subscriptionService.applyPurchasedPlan's comment in the app claimed
 // "iapService validated the receipt on the backend" — a validation that never happened anywhere. A false

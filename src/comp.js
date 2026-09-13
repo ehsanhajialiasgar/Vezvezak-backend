@@ -1,4 +1,4 @@
-// COMP CODES, SERVER-SIDE — launch chain step 6 (Ehsan 2026-09-14).
+// COMP CODES, SERVER-SIDE — launch chain step 6 (Ehsan 2026-09-13).
 //
 // Until today both 90-day comp codes lived as plaintext in the app bundle (VezvezakNew/src/services/
 // compCodes.ts), extractable by anyone who unpacks the .ipa, and redeemed LOCALLY with no account and no
@@ -16,7 +16,7 @@
 // The hashes of codes this account has redeemed are kept in user_plans.comp_redeemed, a column on a table
 // that account deletion ALREADY removes and privacy §11 ALREADY names ("your subscription tier"). A separate
 // comp_redemptions table would be new held data under a new name, and the disclosure gate's clause 4 would
-// not even notice it: it drops any deleted table it has no needle for (recorded 2026-09-14). Keeping this in
+// not even notice it: it drops any deleted table it has no needle for (recorded 2026-09-13). Keeping this in
 // the row that is already disclosed and already deleted avoids widening either gap.
 //
 // ── FAIL CLOSED ON EVERY UNKNOWN ──────────────────────────────────────────────────────────────────────────

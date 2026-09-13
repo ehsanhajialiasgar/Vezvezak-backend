@@ -166,7 +166,7 @@ export async function readJson(request) {
 // IAP receipt validation) and folds it onto a live tier; ABSENT ⇒ 'free', so the
 // server always enforces free limits even before a paid plan is written. Shared
 // by index.js (caps + moderation gate) and extract.js (paid-only gate).
-// EXPIRY IS A SERVER FACT (ledger 1.2, fixed 2026-09-14). user_plans had no expiry and nothing compared
+// EXPIRY IS A SERVER FACT (ledger 1.2, fixed 2026-09-13). user_plans had no expiry and nothing compared
 // dates, so a paid plan never expired on our side. Now a PAID row counts only while expires_at is present,
 // parseable and in the future. An absent or unparseable expiry on a paid row is an UNKNOWN, and unknown
 // resolves to 'free' — fail closed. `nowMs` is injectable so the rule is testable without a clock.
