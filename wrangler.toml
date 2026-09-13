@@ -60,3 +60,12 @@ MODERATION_ENABLED = "0"
 # from "our app cannot produce one" to "the server will not accept one".
 # Flipping this to "1" is a committed, reviewable change and REQUIRES updating privacy §11 first.
 AFFILIATE_ENABLED = "0"
+# AI CHAT FLAG — DEFAULT OFF, fail-closed. /ai/chat (the grounded results-explainer, src/index.js aiChat) sends a
+# conversation to a language model. The handler has always refused unless AI_CHAT_ENABLED === '1', but until
+# 2026-09-13 the flag was declared NOWHERE: "off" was an implicit default (an absent var), and index.js called it
+# "a wrangler.toml" setting that did not exist. An absent var can be set in the Cloudflare dashboard and stay live
+# until the next deploy wipes it (keep_vars is not set) — a published sentence (privacy §5) held by CONFIG outside
+# the repo, the class removed from the policy. Declared here, "0" is the repo's statement and every deploy resets
+# the deployed value to it. scripts/lib/ai-chat-live.mjs (client repo) reads exactly this line.
+# Flipping this to "1" is a committed, reviewable change and REQUIRES updating privacy §5 first.
+AI_CHAT_ENABLED = "0"
