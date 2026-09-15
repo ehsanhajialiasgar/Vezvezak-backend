@@ -468,8 +468,11 @@ async function merchantSubmit(request, env) {
   const address = String(body.address || '').trim();
   if (!storeName || !address) return fail(400, 'Store name and address are required.');
 
+  // AUTH REQUIRED (Ehsan 2026-09-15). A signed-out submission was stored with user_id NULL — a listing no account
+  // deletion can reach, so policy §11 ("we remove … your business listing") had an exception nobody wrote down.
   const claims = await requireAuth(request, env);
-  const rl = await rateLimit(env, `merchant:${claims?.sub || (await ipHash(request, env))}`, 10, 24 * 60 * 60 * 1000);
+  if (!claims) return fail(401, 'Sign in to submit a store.');
+  const rl = await rateLimit(env, `merchant:${claims.sub}`, 10, 24 * 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many submissions today.');
 
   const id = uid('mch');
@@ -478,7 +481,7 @@ async function merchantSubmit(request, env) {
     'phone, website, notes, services, wholesale, status, submitted_at) ' +
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
-    id, claims?.sub || null, storeName,
+    id, claims.sub, storeName,
     (body.category || '').trim() || null, body.bizType || null, address,
     Number.isFinite(body.latitude) ? body.latitude : null,
     Number.isFinite(body.longitude) ? body.longitude : null,
