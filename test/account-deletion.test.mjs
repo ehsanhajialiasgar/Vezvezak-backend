@@ -34,18 +34,23 @@ await t('reviews, app_reviews and merchant listings are DELETED (full erasure)',
 });
 // ORPHAN-CAPABLE WRITES (2026-09-15). A row written with user_id NULL is unreachable by accountDelete, so every §11
 // "we remove …" sentence would carry an unwritten exception. DERIVED: every INSERT binding `claims?.sub || null`.
-// merchants must never be in it. The rest are listed OPEN — signed-out submission may be intended; the founder decides.
-await t('no merchant listing can be written without an account; other anonymous writes are declared, not hidden', () => {
-  const OPEN_FOR_FOUNDER = new Set(['reviews', 'app_reviews', 'jobs', 'influencers', 'feedback']);
+// merchants and reviews must never be in it (both reachable, both named in §11). The rest are OPEN, with the distinction
+// the founder stated 2026-09-15: ENDPOINT OPEN, PATH CLOSED — no reachable app path writes them, so our own app
+// cannot create an orphan today; a caller outside the app still can.
+await t('no merchant listing or review can be written without an account; other anonymous writes are declared, not hidden', () => {
+  const OPEN_FOR_FOUNDER = new Set(['app_reviews', 'jobs', 'influencers', 'feedback']);
   const fns = IDX.split(/\n(?=(?:export\s+)?async function )/);
   const orphanTables = fns.filter(f => /claims\?\.sub \|\| null/.test(f))
     .flatMap(f => [...f.matchAll(/INSERT INTO (\w+)/g)].map(m => m[1]));
   assert.ok(fns.length > 20, 'COULD NOT VERIFY — handlers not split');
   assert.ok(!orphanTables.includes('merchants'), 'merchants must require auth (user_id never NULL)');
+  assert.ok(!orphanTables.includes('reviews'), 'reviews must require auth (§11: every review you wrote is deleted)');
   const undeclared = [...new Set(orphanTables)].filter(x => !OPEN_FOR_FOUNDER.has(x));
   assert.deepEqual(undeclared, [], 'a new anonymous write into a deletable table must be declared here, with the founder');
   const fn = fns.find(f => /^async function merchantSubmit/.test(f) || /\nasync function merchantSubmit/.test('\n' + f));
   assert.match(fn, /if \(!claims\) return fail\(401/);
+  const rv = fns.find(f => /^async function reviewSubmit/.test(f) || /\nasync function reviewSubmit/.test('\n' + f));
+  assert.match(rv, /if \(!claims\) return fail\(401/);
 });
 await t('catalog_variants (no user_id) is deleted via the user\'s items first', () => {
   assert.match(IDX, /DELETE FROM catalog_variants WHERE item_id IN \(SELECT id FROM catalog_items WHERE user_id = \?\)/);

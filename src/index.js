@@ -350,8 +350,11 @@ async function reviewSubmit(request, env) {
   if (!subject) return fail(400, 'Missing subject.');
   if (!(stars >= 1 && stars <= 5)) return fail(400, 'Stars must be between 1 and 5.');
 
+  // AUTH REQUIRED (Ehsan 2026-09-15). A signed-out review was stored with user_id NULL: §11 promises "every review
+  // you wrote" is deleted with the account, and no account deletion can reach that row.
   const claims = await requireAuth(request, env);
-  const rl = await rateLimit(env, `review:${claims?.sub || (await ipHash(request, env))}`, 30, 60 * 60 * 1000);
+  if (!claims) return fail(401, 'Sign in to write a review.');
+  const rl = await rateLimit(env, `review:${claims.sub}`, 30, 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many reviews submitted. Please slow down.');
 
   // SECURITY: id and created_at are SERVER-generated — never trust the client to
@@ -362,7 +365,7 @@ async function reviewSubmit(request, env) {
     'INSERT INTO reviews (id, user_id, subject, stars, text, lang, created_at, ip_hash) ' +
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
-    id, claims?.sub || null, subject, stars,
+    id, claims.sub, subject, stars,
     (body.text || '').trim() || null, body.lang || null,
     nowIso(), await ipHash(request, env),
   ).run();
