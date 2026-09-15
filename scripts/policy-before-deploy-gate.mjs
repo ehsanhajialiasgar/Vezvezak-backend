@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+// POLICY BEFORE DEPLOY — blocks `npm run deploy` (predeploy) and ./deploy.sh (Ehsan 2026-09-15).
+// Run: node scripts/policy-before-deploy-gate.mjs
+//
+// THE RULE: the world must never be more open than the page says. A deploy that starts WRITING a database column the
+// DEPLOYED privacy policy does not describe publishes the collection before the disclosure. The policy text goes out
+// first; this gate refuses the deploy until it has.
+//
+// INCIDENT: launch-chain steps 5/6 (88d439e, 2edcc9d) made the Worker write user_plans.expires_at, source,
+// original_transaction_id, environment and comp_redeemed. Policy §2 describes none of them. It was a note in a report;
+// it is now this gate.
+//
+// DERIVED, NOT LISTED:
+//   • NEW columns = every column in an INSERT INTO t (…) / UPDATE t SET … in src/ at HEAD, MINUS the same derivation run
+//     on the tree at BASELINE (read from git at run time — no hand-kept column list).
+//   • Each new column needs a PHRASE here AND that phrase must appear in the page fetched from the live URL. A new
+//     column with no phrase fails outright: describe it in the policy and give it its phrase in the same pass.
+//   • Both derivations must be non-empty, and the fetched page must be non-empty (a comparison needs two sides).
+//
+// STATED LIMITS:
+//   • BASELINE is the last commit known to be deployed, not read from Cloudflare (a Worker version carries no git sha).
+//     When a deploy succeeds, move BASELINE to that commit in the same pass — otherwise every column since stays "new"
+//     (safe direction: it over-blocks, never under-blocks).
+//   • `npx wrangler deploy` run by hand bypasses npm's predeploy. Deploy with `npm run deploy` or ./deploy.sh.
+//   • Containment only: a phrase present on the page is not proof the sentence around it is right (a person reads it).
+//   • It sees SQL literals in src/. A column written through a dynamically built statement would be invisible.
+import { execSync } from 'node:child_process';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+// 531bee3 = the last commit before launch-chain step 5 (88d439e). Founder, 2026-09-13: "the next deploy ships
+// IAP/comp with the migration unapplied" — everything from 88d439e on is undeployed.
+const BASELINE = '531bee3';
+const POLICY_URL = 'https://vezvezak.com/privacy/';
+
+// A phrase per column the policy must carry before a deploy may write it. Empty for the five IAP/comp columns on
+// purpose: §2 does not describe them yet, so the deploy is blocked until the text is published and the phrase added.
+const PHRASE = {
+  // The baseline Worker only READ user_plans (plans were set owner-side); /iap/validate and /comp/redeem write the row.
+  // §2 already carries the tier, stored against the account: "Your subscription tier and search counts".
+  'user_plans.plan': 'Your subscription tier',
+  'user_plans.user_id': 'Your subscription tier',
+  // expires_at, source, original_transaction_id, environment, comp_redeemed: NO phrase — §2 does not describe them.
+};
+
+// A published SENTENCE a new route falsifies. Derived: the routes are read from src/index.js at HEAD and at BASELINE;
+// a route new since the baseline whose sentence is still on the deployed page blocks the deploy.
+const FALSIFIED_BY_ROUTE = {
+  '/iap/validate': 'Vezvezak has no paid subscriptions today',
+  '/comp/redeem': 'Vezvezak has no paid subscriptions today',
+};
+const BOOKKEEPING = new Set(['id', 'created_at', 'updated_at', 'at']);
+
+const WRITE_RE = [
+  [/INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(\w+)\s*\(([^)]+)\)/gi, m => m[2].split(',').map(c => c.trim().replace(/['"+\s]/g, ''))],
+  [/UPDATE\s+(\w+)\s+SET\s+([\s\S]+?)\s+WHERE/gi, m => [...m[2].matchAll(/(\w+)\s*=/g)].map(c => c[1])],
+];
+function derive(files) {
+  const out = new Set();
+  for (const src of files) for (const [re, cols] of WRITE_RE) for (const m of src.matchAll(re)) for (const c of cols(m)) if (c) out.add(`${m[1]}.${c}`);
+  return out;
+}
+const walk = d => readdirSync(d).flatMap(f => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : /\.(m?js|ts)$/.test(f) ? [p] : []; });
+const head = derive(walk('src').map(f => readFileSync(f, 'utf8')));
+const baseFiles = execSync(`git ls-tree -r --name-only ${BASELINE} -- src`, { encoding: 'utf8' }).split('\n').filter(f => /\.(m?js|ts)$/.test(f));
+const base = derive(baseFiles.map(f => execSync(`git show ${BASELINE}:${f}`, { encoding: 'utf8', maxBuffer: 32e6 })));
+
+const fails = [];
+if (!head.size || !base.size) fails.push(`✗ COULD NOT VERIFY — derived columns: HEAD ${head.size}, ${BASELINE} ${base.size} (both must be non-empty)`);
+const fresh = [...head].filter(c => !base.has(c) && !BOOKKEEPING.has(c.split('.')[1])).sort();
+
+const routesOf = src => new Set([...src.matchAll(/p === '(\/[\w/-]+)'/g)].map(m => m[1]));
+const headRoutes = routesOf(readFileSync('src/index.js', 'utf8'));
+const baseRoutes = routesOf(execSync(`git show ${BASELINE}:src/index.js`, { encoding: 'utf8', maxBuffer: 32e6 }));
+if (!headRoutes.size || !baseRoutes.size) fails.push(`✗ COULD NOT VERIFY — routes derived: HEAD ${headRoutes.size}, ${BASELINE} ${baseRoutes.size}`);
+const newRoutes = [...headRoutes].filter(r => !baseRoutes.has(r) && FALSIFIED_BY_ROUTE[r]);
+
+let page = '';
+if (fresh.length || newRoutes.length) {
+  try {
+    const r = await fetch(`${POLICY_URL}?gate=${Date.now()}`, { headers: { 'Cache-Control': 'no-cache', 'User-Agent': 'vezvezak-policy-before-deploy' } });
+    page = r.ok ? (await r.text()).replace(/<[^>]*>/g, ' ').replace(/&rsquo;/g, "'").replace(/\s+/g, ' ') : '';
+  } catch { page = ''; }
+  if (!page) fails.push(`✗ COULD NOT VERIFY — the deployed policy at ${POLICY_URL} returned nothing; a deploy that adds columns cannot proceed blind`);
+}
+for (const c of fresh) {
+  if (!PHRASE[c]) fails.push(`✗ ${c} — written at HEAD, not at the deployed baseline ${BASELINE}, and the policy has no phrase for it. Publish the text first, then add its phrase here.`);
+  else if (page && !page.toLowerCase().includes(PHRASE[c].toLowerCase())) fails.push(`✗ ${c} — phrase "${PHRASE[c]}" is not on the DEPLOYED policy. Publish the policy before this deploy.`);
+}
+
+for (const r of newRoutes) if (page && page.includes(FALSIFIED_BY_ROUTE[r])) fails.push(`✗ route ${r} is new since ${BASELINE} and the deployed policy still says "${FALSIFIED_BY_ROUTE[r]}". Publish the corrected text before this deploy.`);
+
+console.log(`  field of view: routes HEAD ${headRoutes.size} / ${BASELINE} ${baseRoutes.size}, new route(s) that falsify a published sentence: ${newRoutes.join(', ') || '—'}`);
+console.log(`  field of view: ${head.size} table.column writes at HEAD, ${base.size} at deployed baseline ${BASELINE}; ${fresh.length} new: ${fresh.join(', ') || '—'}`);
+if (fails.length) { console.error(`POLICY BEFORE DEPLOY — BLOCKED (${fails.length}):\n  ${fails.join('\n  ')}`); process.exit(1); }
+console.log('  ✓ every column this deploy newly writes is described on the deployed policy');

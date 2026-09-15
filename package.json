@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "predeploy": "node scripts/policy-before-deploy-gate.mjs",
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute vezvezak --remote --file=./schema.sql",
     "db:init:local": "wrangler d1 execute vezvezak --local --file=./schema.sql",
