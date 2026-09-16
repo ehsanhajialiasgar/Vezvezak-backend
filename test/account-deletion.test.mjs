@@ -26,8 +26,14 @@ await t('both /account/export and /account/delete are routed', () => {
   assert.match(IDX, /p === '\/account\/export'\) return accountExport/);
   assert.match(IDX, /p === '\/account\/delete'\) return accountDelete/);
 });
+await t('jobs and influencers are gone: not deleted (dropped), not exported, not in the schema', () => {
+  assert.ok(!/\bFROM (jobs|influencers)\b/.test(IDX), 'no code reads or deletes the dropped tables');
+  assert.ok(!/CREATE TABLE IF NOT EXISTS (jobs|influencers)/.test(SCHEMA), 'schema no longer creates them');
+  assert.match(SCHEMA, /DROP TABLE IF EXISTS jobs;/);
+  assert.match(SCHEMA, /DROP TABLE IF EXISTS influencers;/);
+});
 await t('reviews, app_reviews and merchant listings are DELETED (full erasure)', () => {
-  for (const tbl of ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches']) {
+  for (const tbl of ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches']) {
     assert.ok(new RegExp(`DELETE_BY_USER_ID = \\[[^\\]]*'${tbl}'`).test(IDX), `${tbl} must be in the delete list`);
   }
   assert.ok(!/UPDATE reviews SET user_id = NULL/.test(IDX), 'no anonymise path — full deletion today');
@@ -116,8 +122,6 @@ function seed(uid, identifier, tag) {
   db.prepare('INSERT INTO merchants (id,user_id,store_name,address,status,submitted_at) VALUES (?,?,?,?,?,?)').run('mer_' + tag, uid, 'Store', 'Somewhere', 'live', iso);
   db.prepare('INSERT INTO catalog_items (id,merchant_id,user_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run('cit_' + tag, 'mer_' + tag, uid, 'Item', 'live', iso, iso);
   db.prepare('INSERT INTO catalog_variants (id,item_id,merchant_id,price,created_at) VALUES (?,?,?,?,?)').run('var_' + tag, 'cit_' + tag, 'mer_' + tag, 9.99, iso);
-  db.prepare('INSERT INTO jobs (id,user_id,title,business,status,submitted_at) VALUES (?,?,?,?,?,?)').run('job_' + tag, uid, 'Job', 'Biz', 'live', iso);
-  db.prepare('INSERT INTO influencers (id,user_id,name,handle,status,submitted_at) VALUES (?,?,?,?,?,?)').run('inf_' + tag, uid, 'Inf', '@h', 'live', iso);
   db.prepare('INSERT INTO verifications (id,user_id,kind,status,submitted_at) VALUES (?,?,?,?,?)').run('ver_' + tag, uid, 'seller', 'pending', iso);
   db.prepare('INSERT INTO feedback (id,user_id,kind,text,status,created_at) VALUES (?,?,?,?,?,?)').run('fb_' + tag, uid, 'bug', 'hi', 'new', iso);
   db.prepare('INSERT INTO referral_codes (code,user_id,created_at) VALUES (?,?,?)').run('CODE_' + tag, uid, iso);
@@ -153,7 +157,6 @@ await t('export returns the account + its rows, never pw_hash', async () => {
   assert.ok(!('pw_hash' in ex.account) && !('pw_salt' in ex.account), 'no password material in export');
   assert.equal(ex.reviews.length, 1, 'the user\'s review is included');
   assert.equal(ex.merchants.length, 1);
-  assert.equal(ex.jobs.length, 1);
 });
 
 console.log('\n(d) delete returns success ONLY on a real account');
@@ -201,7 +204,6 @@ await t('the second user\'s rows are completely untouched', () => {
   assert.equal(db.prepare("SELECT COUNT(*) c FROM users WHERE id='usr_keep'").get().c, 1);
   assert.equal(db.prepare("SELECT COUNT(*) c FROM reviews WHERE ip_hash='IPHASH_keep'").get().c, 1);
   assert.equal(db.prepare("SELECT COUNT(*) c FROM catalog_variants WHERE id='var_keep'").get().c, 1);
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM jobs WHERE user_id='usr_keep'").get().c, 1);
   assert.equal(db.prepare('SELECT COUNT(*) c FROM rate_limits WHERE bucket IN (?, ?)').get('login:' + BUCKET['other_user@example.test'], 'merchant:' + BUCKET['usr_keep']).c, 2, 'the other account\'s counters survive');
 });
 

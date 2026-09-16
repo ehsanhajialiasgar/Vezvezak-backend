@@ -282,7 +282,7 @@ async function me(request, env) {
 // this account), and telemetry (PII-free by construction). We deliberately do NOT
 // send a deviceId at deletion to reach them — creating a user↔device link at the
 // moment of erasure is the wrong trade (Ehsan).
-const DELETE_BY_USER_ID = ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'jobs', 'influencers', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches'];
+const DELETE_BY_USER_ID = ['reviews', 'app_reviews', 'merchants', 'catalog_items', 'verifications', 'feedback', 'referral_codes', 'user_plans', 'weekly_search_usage', 'consumed_searches'];   // jobs + influencers dropped 2026-09-16 (migrations_drop_jobs_influencers.sql)
 
 export async function accountDelete(request, env) {
   const claims = await requireAuth(request, env);
@@ -333,8 +333,6 @@ export async function accountExport(request, env) {
     appReviews: await q('SELECT id, stars, text, approved, created_at FROM app_reviews WHERE user_id = ?'),
     merchants: await q('SELECT id, store_name, category, biz_type, address, phone, website, status, submitted_at FROM merchants WHERE user_id = ?'),
     catalogItems: await q('SELECT id, merchant_id, title, brand, model, gtin, category, status, created_at FROM catalog_items WHERE user_id = ?'),
-    jobs: await q('SELECT id, title, business, employment_type, address, phone, status, submitted_at FROM jobs WHERE user_id = ?'),
-    influencers: await q('SELECT id, name, handle, offer, phone, website, status, submitted_at FROM influencers WHERE user_id = ?'),
     verifications: await q('SELECT id, kind, company_name, is_company, status, submitted_at FROM verifications WHERE user_id = ?'),
     feedback: await q('SELECT id, kind, text, status, created_at FROM feedback WHERE user_id = ?'),
     referralCode: await q('SELECT code, created_at FROM referral_codes WHERE user_id = ?'),
