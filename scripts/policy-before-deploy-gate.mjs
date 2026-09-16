@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// POLICY BEFORE DEPLOY — blocks `npm run deploy` (predeploy) and ./deploy.sh (Ehsan 2026-09-15).
+// POLICY BEFORE DEPLOY — blocks `npm run deploy` (predeploy) (Ehsan 2026-09-15).
 // Run: node scripts/policy-before-deploy-gate.mjs
 //
 // THE RULE: the world must never be more open than the page says. A deploy that starts WRITING a database column the
@@ -21,16 +21,19 @@
 //   • BASELINE is the last commit known to be deployed, not read from Cloudflare (a Worker version carries no git sha).
 //     When a deploy succeeds, move BASELINE to that commit in the same pass — otherwise every column since stays "new"
 //     (safe direction: it over-blocks, never under-blocks).
-//   • `npx wrangler deploy` run by hand bypasses npm's predeploy. Deploy with `npm run deploy` or ./deploy.sh.
+//   • `npx wrangler deploy` run by hand bypasses npm's predeploy. Deploy with `npm run deploy`.
 //   • Containment only: a phrase present on the page is not proof the sentence around it is right (a person reads it).
 //   • It sees SQL literals in src/. A column written through a dynamically built statement would be invisible.
 import { execSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-// 531bee3 = the last commit before launch-chain step 5 (88d439e). Founder, 2026-09-13: "the next deploy ships
-// IAP/comp with the migration unapplied" — everything from 88d439e on is undeployed.
-const BASELINE = '531bee3';
+// 1d026f5 = the code the live Worker runs (2026-09-16). Version 13a34f7b was uploaded 2026-09-10T12:41Z, two minutes
+// after 1d026f5; the secret change 811f8393 (live, 100%) carries the same script etag. Probed, not read from a
+// dashboard: POST /extract answers 401 (route present, so before a49358d deleted it) and /affiliate/click answers
+// 503 affiliate_disabled (so 0b1e2dc or later); src is identical from 0b1e2dc to 1d026f5. The previous value,
+// 531bee3, was never deployed — it was written as a fact about Cloudflare and nothing checked it.
+const BASELINE = '1d026f5';
 const POLICY_URL = 'https://vezvezak.com/privacy/';
 
 // A phrase per column the policy must carry before a deploy may write it. Empty for the five IAP/comp columns on
