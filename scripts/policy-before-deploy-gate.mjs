@@ -18,9 +18,13 @@
 //   • Both derivations must be non-empty, and the fetched page must be non-empty (a comparison needs two sides).
 //
 // STATED LIMITS:
-//   • BASELINE is the last commit known to be deployed, not read from Cloudflare (a Worker version carries no git sha).
-//     When a deploy succeeds, move BASELINE to that commit in the same pass — otherwise every column since stays "new"
-//     (safe direction: it over-blocks, never under-blocks).
+//   • BASELINE = the commit the LIVE Worker runs, derived at run time (see liveBaseline). Cloudflare holds no git sha
+//     of its own, so `npm run deploy` writes one: --tag <HEAD>. The gate reads the live version, and if a secret change
+//     made it untagged, the newest tagged version with the SAME script etag. Uploads made before tagging existed are
+//     recorded in UNTAGGED by etag — a fact the gate re-checks against Cloudflare on every run, not a free constant.
+//     Anything it cannot resolve — split traffic, an unknown etag, a tag git does not know — blocks the deploy.
+//   • Wrangler lists only the most recent versions; more untagged secret changes than that since the last deploy
+//     leaves the tagged one out of view and the gate blocks (safe direction).
 //   • `npx wrangler deploy` run by hand bypasses npm's predeploy. Deploy with `npm run deploy`.
 //   • Containment only: a phrase present on the page is not proof the sentence around it is right (a person reads it).
 //   • It sees SQL literals in src/. A column written through a dynamically built statement would be invisible.
@@ -28,12 +32,43 @@ import { execSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-// 1d026f5 = the code the live Worker runs (2026-09-16). Version 13a34f7b was uploaded 2026-09-10T12:41Z, two minutes
-// after 1d026f5; the secret change 811f8393 (live, 100%) carries the same script etag. Probed, not read from a
-// dashboard: POST /extract answers 401 (route present, so before a49358d deleted it) and /affiliate/click answers
-// 503 affiliate_disabled (so 0b1e2dc or later); src is identical from 0b1e2dc to 1d026f5. The previous value,
-// 531bee3, was never deployed — it was written as a fact about Cloudflare and nothing checked it.
-const BASELINE = '1d026f5';
+// Uploads made before deploys carried a tag: script etag → commit. Each entry is evidence, not belief — it is used
+// only while Cloudflare reports that exact etag as live.
+// 77ff5c8b… = version 13a34f7b (uploaded 2026-09-10T12:41Z, two minutes after 1d026f5) and the secret change 811f8393.
+// Probed 2026-09-16, not read from a dashboard: POST /extract answers 401 (route present — before a49358d deleted
+// it) and /affiliate/click answers 503 affiliate_disabled (0b1e2dc or later); src is identical 0b1e2dc..1d026f5.
+// The constant it replaces said 531bee3, which was never deployed; nothing checked it.
+const UNTAGGED = { '77ff5c8b2c183668fc535651aa95319c4436264cdda4d237bfb226d559682546': '1d026f5' };
+const WRANGLER = (JSON.parse(readFileSync('package.json', 'utf8')).scripts.deploy.match(/^npx --yes (wrangler@\d+\.\d+\.\d+) deploy --tag /) || [])[1];
+const wrangler = args => JSON.parse(execSync(`npx --yes ${WRANGLER} ${args} --json`, { encoding: 'utf8', env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 32e6 }));
+const TAG = v => v?.annotations?.['workers/tag'];
+function liveBaseline() {
+  if (!WRANGLER) throw new Error('package.json "deploy" is not `npx --yes wrangler@<exact> deploy --tag …` — the deploy would not record its commit');
+  const dirty = execSync('git status --porcelain -- src wrangler.toml', { encoding: 'utf8' }).trim();
+  if (dirty) throw new Error(`src/ or wrangler.toml differs from HEAD — the upload would not be the commit its tag names:\n${dirty}`);
+  const shares = wrangler('deployments status').versions || [];
+  if (shares.length !== 1 || shares[0].percentage !== 100) throw new Error(`live traffic is split across ${shares.length} version(s) — one baseline cannot describe it`);
+  const id = shares[0].version_id;
+  const live = wrangler(`versions view ${id}`);
+  const etag = live?.resources?.script?.etag;
+  if (!etag) throw new Error(`live version ${id} reports no script etag`);
+  let sha, how;
+  if (TAG(live)) [sha, how] = [TAG(live), `tag on live version ${id.slice(0, 8)}`];
+  else {
+    for (const v of wrangler('versions list').reverse()) {
+      if (!TAG(v)) continue;
+      if (wrangler(`versions view ${v.id}`)?.resources?.script?.etag === etag) { [sha, how] = [TAG(v), `tag on ${v.id.slice(0, 8)}, same script etag as live ${id.slice(0, 8)}`]; break; }
+    }
+    if (!sha && UNTAGGED[etag]) [sha, how] = [UNTAGGED[etag], `recorded untagged upload, live ${id.slice(0, 8)} etag ${etag.slice(0, 8)}`];
+  }
+  if (!sha) throw new Error(`live version ${id} (etag ${etag.slice(0, 12)}) matches no tagged version and no recorded upload — find what is running (a probe that answers differently between versions) and record it`);
+  try { execSync(`git cat-file -e ${sha}^{commit}`, { stdio: 'ignore' }); } catch { throw new Error(`live commit ${sha} (${how}) is not in this repository`); }
+  return [sha, how];
+}
+let BASELINE, BASELINE_HOW;
+try { [BASELINE, BASELINE_HOW] = liveBaseline(); }
+catch (e) { console.error(`POLICY BEFORE DEPLOY — BLOCKED: COULD NOT DERIVE THE LIVE COMMIT — ${e.message.split('\n')[0]}`); if (e.message.includes('\n')) console.error(e.message.split('\n').slice(1).join('\n')); process.exit(1); }
+console.log(`  live commit: ${BASELINE} (${BASELINE_HOW})`);
 const POLICY_URL = 'https://vezvezak.com/privacy/';
 
 // A phrase per column the policy must carry before a deploy may write it. Empty for the five IAP/comp columns on

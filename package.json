@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "predeploy": "node scripts/policy-before-deploy-gate.mjs",
-    "deploy": "wrangler deploy",
+    "deploy": "npx --yes wrangler@4.132.0 deploy --tag \"$(git rev-parse --short=12 HEAD)\"",
     "db:init": "wrangler d1 execute vezvezak --remote --file=./schema.sql",
     "db:init:local": "wrangler d1 execute vezvezak --local --file=./schema.sql",
     "test": "node test/crypto.test.mjs"
