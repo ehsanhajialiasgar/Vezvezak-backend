@@ -21,19 +21,19 @@ function bodyOf(name) {
   return IDX.slice(start, end);
 }
 
-await t('aiNormalize gates on AI_NORMALIZE_ENABLED !== "1" and returns the raw query (fail closed)', () => {
+await t('aiNormalize gates on AI_NORMALIZE_ENABLED !== "1" and returns UNRESOLVED (fail closed)', () => {
   const body = bodyOf('aiNormalize');
-  assert.match(body, /env\.AI_NORMALIZE_ENABLED\s*!==\s*'1'\s*\)\s*return ok\(\{ query \}\)/,
-    'the flag gate must return the raw query when the flag is not "1"');
+  assert.match(body, /env\.AI_NORMALIZE_ENABLED\s*!==\s*'1'\s*\)\s*return ok\(\{ query, resolved: false, reason: 'disabled' \}\)/,
+    'the flag gate must answer unresolved when the flag is not "1"');
 });
 
-await t('the flag check runs BEFORE anything can reach the model (env.AI / translateQuery)', () => {
+await t('the flag check runs BEFORE anything can reach the model (env.AI / resolveIntent)', () => {
   const body = bodyOf('aiNormalize');
   const gate = body.indexOf('AI_NORMALIZE_ENABLED');
-  const model = body.search(/translateQuery\(|env\.AI\b/);
+  const model = body.search(/resolveIntent\(|env\.AI\b/);
   assert.ok(gate >= 0, 'flag gate present');
   assert.ok(model >= 0, 'a model-reaching reference exists');
-  assert.ok(gate < model, 'the flag gate must precede every env.AI / translateQuery reference');
+  assert.ok(gate < model, 'the flag gate must precede every env.AI / resolveIntent reference');
 });
 
 await t('wrangler.toml declares the flag and DEFAULTS IT OFF (never "1")', () => {

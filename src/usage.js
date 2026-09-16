@@ -29,6 +29,14 @@ export const WEEKLY_CAPS = {
   max:  { local: 45, online: 100 },
 };
 
+// ASSISTANT TURNS per week (Ehsan 2026-09-16; sized 2026-08-28 at ~$0.00024/turn, <1% of a paid plan at the cap).
+// A RUNAWAY control, not a cost model. Free is 0: the assistant is a paid feature, like live search. Counted as rows
+// of kind 'ai' in consumed_searches for the account's current weekly window (no new column, no migration).
+export const AI_WEEKLY_TURNS = { free: 0, pro: 150, max: 400 };
+export function aiTurnCap(plan) {
+  return AI_WEEKLY_TURNS[resolvePlan(plan)] ?? 0;
+}
+
 // Only these two kinds are metered as SLOTS. Accessibility (voice.listen /
 // voice.speak) is on-device and NEVER routed through consume — it is not billable
 // and not a member of this set, so it can never be counted against a cap.

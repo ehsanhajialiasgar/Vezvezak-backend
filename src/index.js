@@ -30,14 +30,14 @@
 import {
   CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword,
   signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject } from './lib.js';
-import { translateQuery, cacheGet, cacheSet } from './translate.js';
+import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
 import {
-  WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, resolvePlan, planCaps, billableAiAllowed,
+  WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, resolvePlan, planCaps, billableAiAllowed, aiTurnCap,
   refillSlot, windowStartFor, nextResetMs, shouldRefill, capReached,
 } from './usage.js';
 
@@ -338,6 +338,7 @@ export async function accountExport(request, env) {
     referralCode: await q('SELECT code, created_at FROM referral_codes WHERE user_id = ?'),
     plan: await q('SELECT plan, expires_at, source, environment, comp_redeemed, updated_at FROM user_plans WHERE user_id = ?'),
     usage: await q('SELECT local_used, online_used, window_start FROM weekly_search_usage WHERE user_id = ?'),
+    assistantTurns: await q("SELECT window_start, COUNT(*) AS turns FROM consumed_searches WHERE user_id = ? AND kind = 'ai' GROUP BY window_start"),
   };
   return ok({ export: data });
 }
@@ -1098,42 +1099,38 @@ async function usageRecord(request, env) {
   return ok({ deprecated: true, note: 'recording moved to /search/consume' });
 }
 
-// POST /ai/normalize  {query, source}  ->  {ok, query}
-// Translate a non-Latin search query to English for matching. Called pre-auth from the hot path,
-// so it FAILS OPEN at every branch: OFF-flag, bad input, no AI, over the daily ceiling, or any
-// error returns the RAW query with 200 — the search always proceeds. The client only calls this
-// when its own detectQueryHl found a non-Latin script, and it bounds the call at 400ms.
+// POST /ai/normalize  {query}  ->  {ok, query, resolved, reason?}
+// INTENT RESOLUTION (Ehsan 2026-09-16): every search query — any language, any script, no language list — is turned
+// into the English product search terms it means (translate.js). The answer says whether it was RESOLVED; the client
+// searches with the resolved terms, and when a query is not resolved it abstains on non-ASCII input and searches the
+// raw text only for plain-ASCII input. Pre-auth: the global daily ceiling bounds cost; no user id, IP or location is
+// sent to the model.
 //
-// FLAG-GATED like /ai/chat (Ehsan 2026-08-30). This route sends the search query to Workers AI
-// (@cf/meta/m2m100-1.2b), so the DEPLOY STATE must NOT be what decides whether it leaves — with only
-// the `!env.AI` check below, one bare `wrangler deploy` would start sending query text to a language
-// model and make privacy §6 false, with no code change and no decision by anyone. OFF unless
-// AI_NORMALIZE_ENABLED === '1' (default "0" in wrangler.toml); flipping it on is a committed,
-// reviewable change, and the BUILT-HELD note in translate.js still says re-run the live harness first.
-// When off it fails CLOSED on egress: the raw query goes back and env.AI / translateQuery are never
-// reached. The check sits FIRST so nothing downstream can touch the model.
-const NORMALIZE_DAILY_MAX = 20000; // GLOBAL safety ceiling (no per-user slot). Over it → raw query.
-async function aiNormalize(request, env) {
+// FLAG-GATED like /ai/chat (Ehsan 2026-08-30): the search text reaches a language model only when
+// AI_NORMALIZE_ENABLED === '1' — a committed, reviewable change that follows the policy page, never a bare deploy.
+// When off it fails CLOSED on egress: resolved:false and env.AI / resolveIntent are never reached. The check sits FIRST.
+const NORMALIZE_DAILY_MAX = 20000; // GLOBAL safety ceiling (no per-user slot). Over it → unresolved.
+export async function aiNormalize(request, env) {
   const body = (await readJson(request)) || {};
   const query = typeof body.query === 'string' ? body.query.trim().slice(0, 200) : '';
-  const source = typeof body.source === 'string' ? body.source.toLowerCase().slice(0, 8) : '';
   // FLAG GATE (fail CLOSED on egress) — the model is unreachable unless explicitly enabled.
-  if (env.AI_NORMALIZE_ENABLED !== '1') return ok({ query });
-  // Fail open on bad input or a missing model — never error a search, just hand back the raw query.
-  if (!query || !/^[a-z]{2,3}$/.test(source) || !env.AI) return ok({ query });
+  if (env.AI_NORMALIZE_ENABLED !== '1') return ok({ query, resolved: false, reason: 'disabled' });
+  if (!query || !env.AI) return ok({ query, resolved: false, reason: 'unavailable' });
 
-  // Cache first: a hit costs nothing and does NOT touch the daily ceiling.
-  const hit = await cacheGet(env, query, source);
-  if (hit != null) return ok({ query: hit });
+  // Cache first: a hit costs nothing and does NOT touch the daily ceiling. [[UNKNOWN]] is cached too.
+  const hit = await cacheGet(env, query, 'intent');
+  if (hit === UNKNOWN) return ok({ query, resolved: false, reason: 'unknown' });
+  if (hit != null) return ok({ query: hit, resolved: true });
 
-  // Global daily safety ceiling — abuse/cost bound, not a per-user cap. Over it degrades to the
-  // raw query (fail open); it never blocks the search.
   const gate = await rateLimit(env, 'ai:normalize', NORMALIZE_DAILY_MAX, 86_400_000);
-  if (!gate.allowed) return ok({ query });
+  if (!gate.allowed) return ok({ query, resolved: false, reason: 'busy' });
 
-  const translated = await translateQuery(env, query, source);
-  await cacheSet(env, query, source, translated, Date.now());
-  return ok({ query: translated });
+  let r;
+  try { r = await resolveIntent(env, query); }
+  catch { return ok({ query, resolved: false, reason: 'model_error' }); }
+  if (r.resolved) await cacheSet(env, query, 'intent', r.query, Date.now());
+  else if (r.reason === 'unknown') await cacheSet(env, query, 'intent', UNKNOWN, Date.now());
+  return r.resolved ? ok({ query: r.query, resolved: true }) : ok({ query, resolved: false, reason: r.reason });
 }
 
 // ── /ai/chat — STAGE 1: GROUNDED-IN-RESULTS ONLY (Ehsan 2026-08-27) ────────────
@@ -1153,9 +1150,14 @@ const AI_CHAT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const CANT_ANSWER = '[[CANT_ANSWER]]';
 const AI_CHAT_GLOBAL_DAILY = 20000;   // global safety ceiling (cost/abuse bound), per day
 const AI_CHAT_PER_IP_HOURLY = 60;     // per-IP hourly ceiling
-async function aiChat(request, env) {
+export async function aiChat(request, env) {
   if (env.AI_CHAT_ENABLED !== '1') return fail(503, 'AI chat is not enabled yet.', 'disabled');
   if (!env.AI) return fail(503, 'AI chat is not available.', 'no_model');
+  // PER-USER WEEKLY CAP (Ehsan 2026-09-16) — signed in, and within the plan's assistant turns this week.
+  const claims = await requireAuth(request, env);
+  if (!claims?.sub) return fail(401, 'Sign in to use the assistant.', 'auth_required');
+  const cap = aiTurnCap(await planFor(env, claims.sub));
+  if (cap <= 0) return fail(402, 'The assistant is part of Pro and Max.', 'plan');
   const body = (await readJson(request)) || {};
   const system = typeof body.system === 'string' ? body.system : '';
   const context = body.context;                       // RESULT_CONTEXT (client-structured)
@@ -1164,14 +1166,25 @@ async function aiChat(request, env) {
   // Stage 1 is grounded-ONLY: without a context there is nothing to be grounded in,
   // and without the grounded system prompt this is not stage 1 — refuse, never free-chat.
   if (!system || !context || !question) return ok({ reply: CANT_ANSWER });
-  // Abuse ceilings — a PRE-AUTH route reaching a metered host (Workers AI) must be bounded
-  // BROADER than a per-identifier limit (there is none here to defeat). Both fail CLOSED:
+  // Abuse ceilings, kept alongside the per-user cap (2026-09-16): the route is signed-in now, but a GLOBAL bucket
+  // still bounds total cost and a PER-IP bucket still stops one client cycling accounts. Both fail CLOSED:
   // a GLOBAL daily bucket bounds cost, and a PER-IP hourly bucket stops one client draining
   // it — so a rotated identifier cannot run up the model bill (preauthCeilings gate).
   const g = await rateLimit(env, 'aichat:global', AI_CHAT_GLOBAL_DAILY, 24 * 60 * 60 * 1000);
   if (!g.allowed) return fail(503, 'AI chat is busy right now. Please try again later.', 'rate_global');
   const ipc = await rateLimit(env, `aichatip:${await ipHash(request, env)}`, AI_CHAT_PER_IP_HOURLY, 60 * 60 * 1000);
   if (!ipc.allowed) return fail(429, 'Too many requests. Please slow down.', 'rate_ip');
+  // Take the turn atomically: the row is inserted only while this window's count is under the cap.
+  const week = await weeklyRow(env, claims.sub);
+  const turnId = crypto.randomUUID();
+  const took = await env.DB.prepare(
+    "INSERT INTO consumed_searches (user_id, search_id, kind, window_start, photos_used, created_at) " +
+    "SELECT ?, ?, 'ai', ?, 0, ? WHERE (SELECT COUNT(*) FROM consumed_searches WHERE user_id = ? AND kind = 'ai' AND window_start = ?) < ?",
+  ).bind(claims.sub, turnId, week.window_start, nowIso(), claims.sub, week.window_start, cap).run();
+  if (!(took?.meta?.changes)) {
+    return json(402, { ok: false, error: "You've used this week's assistant questions.", reason: 'cap_reached', cap, resetAt: new Date(nextResetMs(week.window_start)).toISOString() });
+  }
+  const refund = () => env.DB.prepare("DELETE FROM consumed_searches WHERE user_id = ? AND search_id = ? AND kind = 'ai'").bind(claims.sub, turnId).run();
   try {
     const r = await env.AI.run(AI_CHAT_MODEL, {
       messages: [
@@ -1186,6 +1199,7 @@ async function aiChat(request, env) {
     return ok({ reply: reply || CANT_ANSWER, usage: r?.usage || null });
   } catch (e) {
     console.error('ai/chat', e);
+    try { await refund(); } catch { /* the turn stays counted; the cap errs toward fewer turns, never more */ }
     return fail(503, 'AI chat is temporarily unavailable.', 'model_error');
   }
 }
