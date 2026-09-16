@@ -40,4 +40,18 @@ t('missing merchant coords => NO match (never guess a badge)', () => {
   assert.equal(merchantMatches(store, { store_name: 'Joes Pizza', latitude: null, longitude: null }), false);
 });
 
+// ── PERSIAN (2026-09-16) — nameTokens kept only [a-z0-9]; a Persian name became empty and never matched. ──
+t('fa: a Persian store name matches itself, across Arabic ي/ك, a ZWNJ and the generic word «فروشگاه»', () => {
+  const m = { store_name: 'فروشگاه دیجیتال آریا', latitude: 35.7, longitude: 51.4 };
+  assert.ok(nameTokens('فروشگاه دیجیتال آریا').length > 0, 'Persian letters are kept');
+  assert.equal(merchantMatches({ name: 'فروشگاه دیجیتال آریا', lat: 35.7, lng: 51.4 }, m), true);
+  assert.equal(merchantMatches({ name: 'ديجيتال آريا', lat: 35.7, lng: 51.4 }, m), true, 'Arabic ي folds to ی; «فروشگاه» is generic');
+  assert.equal(merchantMatches({ name: 'فروشگاه‌دیجیتال آریا', lat: 35.7, lng: 51.4 }, m), true, 'ZWNJ splits like a space');
+});
+t('fa: a different Persian shop, or the same name far away, does NOT match', () => {
+  const m = { store_name: 'فروشگاه دیجیتال آریا', latitude: 35.7, longitude: 51.4 };
+  assert.equal(merchantMatches({ name: 'کتابفروشی آریا', lat: 35.7, lng: 51.4 }, m), false);
+  assert.equal(merchantMatches({ name: 'فروشگاه دیجیتال آریا', lat: 35.8, lng: 51.4 }, m), false);
+});
+
 console.log(`\n${pass} verified-match tests passed.`);

@@ -52,6 +52,22 @@ t('attributes object is JSON-stringified', () => {
 });
 
 console.log('\nProhibited-content screen');
+t('fa: clearly-prohibited Persian listings are caught (2026-09-16 — this screen was English-only)', () => {
+  for (const [text, reason] of [
+    ['فروش اسلحه کمری با فشنگ', 'weapons'], ['نارنجک دستی', 'weapons'], ['تریاک مرغوب', 'drugs'],
+    ['ساعت رولکس رپلیکا', 'counterfeit'], ['کیف گوچی های کپی', 'counterfeit'], ['کفش نایک تقلبی ارزان', 'counterfeit'],
+    ['فروش کلیه فوری', 'illegal'],
+  ]) {
+    const r = screenCatalogText(text);
+    assert.equal(r.prohibited, true, text);
+    assert.equal(r.reason, reason, text);
+  }
+});
+t('fa: ordinary Persian listings pass, including a seller saying the item is NOT fake', () => {
+  for (const text of ['پاوربانک ۲۰۰۰۰ میلی‌آمپر', 'کفش ورزشی نایک اصل، غیرتقلبی', 'ساعت اصل — نه تقلبی', 'لیوان شیشه‌ای', 'کتاب آموزش برنامه‌نویسی']) {
+    assert.equal(screenCatalogText(text).prohibited, false, text);
+  }
+});
 t('clearly-prohibited listings are caught by keyword', () => {
   assert.equal(screenCatalogText('Glock 19 pistol with ammo').prohibited, true);
   assert.equal(screenCatalogText('counterfeit Rolex replica watch').prohibited, true);

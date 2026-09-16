@@ -54,6 +54,8 @@ export function normalizeItem(input) {
 // Deterministic prohibited-content screen — the fast first moderation layer, run
 // before any AI. Catches clearly-illegal/against-policy listings by keyword so
 // they're rejected instantly and never depend on a model being available.
+const FA_SRC = (words) => `(?:^|[^\\p{L}])(?:${words})(?:$|[^\\p{L}])`;
+const FA = (words) => new RegExp(FA_SRC(words), 'u');
 const PROHIBITED = [
   { re: /\b(guns?|firearms?|rifles?|pistols?|handguns?|ammunition|ammo|silencers?)\b/i, reason: 'weapons' },
   { re: /\b(grenades?|explosives?|c4|dynamite|bombs?)\b/i, reason: 'weapons' },
@@ -61,6 +63,15 @@ const PROHIBITED = [
   { re: /\b(counterfeit|knock ?off|fake (rolex|gucci|louis|brand)|replica (watch|bag))\b/i, reason: 'counterfeit' },
   { re: /\b(human organs?|organ for sale|human trafficking)\b/i, reason: 'illegal' },
   { re: /\b(child ?porn|csam|underage (porn|sex))\b/i, reason: 'csam' },
+  // PERSIAN (2026-09-16) — Persian is the primary market and this screen was English-only. Words are matched between
+  // non-letters (JS \b does not see Persian letters). Left out on purpose: «شیشه» (meth slang, but mostly "glass").
+  // «تقلبی/جعلی» only when not negated («غیرتقلبی», «نه تقلبی» — a seller saying the item is genuine).
+  { re: FA('اسلحه|سلاح گرم|تفنگ|کلت کمری|کلاشینکف|فشنگ|مهمات|صداخفه‌کن|صدا خفه کن'), reason: 'weapons' },
+  { re: FA('نارنجک|مواد منفجره|دینامیت|بمب'), reason: 'weapons' },
+  { re: FA('کوکائین|هروئین|متامفتامین|تریاک|مواد مخدر|ماری‌جوانا|ماریجوانا'), reason: 'drugs' },
+  { re: new RegExp(`(?:^|[^\\p{L}])(?<!غیر ?)(?<!غیرِ ?)(?<!نه )(?:تقلبی|جعلی)(?:$|[^\\p{L}])|${FA_SRC('رپلیکا|های ?کپی|کپی درجه ?یک')}`, 'u'), reason: 'counterfeit' },
+  { re: FA('فروش کلیه|فروش عضو بدن|قاچاق انسان'), reason: 'illegal' },
+  { re: FA('پورن کودک|هرزه‌نگاری کودک'), reason: 'csam' },
 ];
 
 export function screenCatalogText(text) {

@@ -3,15 +3,20 @@
 // real, verified merchant matches by name AND location (Doctrine Art.8: never a
 // faked badge). No I/O here, so it's unit-testable.
 
-const SUFFIXES = new Set(['inc', 'llc', 'ltd', 'co', 'corp', 'company', 'the', 'store', 'shop']);
+const SUFFIXES = new Set(['inc', 'llc', 'ltd', 'co', 'corp', 'company', 'the', 'store', 'shop',
+  'فروشگاه', 'شرکت', 'مغازه']);   // Persian: store, company, shop
 
-// Normalize a business name to a comparable token set: lowercase, strip
-// punctuation/diacritics-ish, drop generic suffix words.
+// Normalize a business name to a comparable token set: lowercase, strip punctuation, drop generic suffix words.
+// PERSIAN (2026-09-16): this kept only [a-z0-9], so a Persian name became EMPTY and could never match — Persian is the
+// primary market. Letters and digits of any script are kept; Arabic ي/ك fold to Persian ی/ک, Persian/Arabic-Indic
+// digits to ASCII, and the zero-width non-joiner splits like a space ("فروشگاه‌دیجیتال" = "فروشگاه دیجیتال").
 export function nameTokens(name) {
   return String(name || '')
     .toLowerCase()
     .replace(/['’]/g, '')        // drop apostrophes so "Joe's" -> "joes"
-    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/ي/g, 'ی').replace(/ك/g, 'ک')
+    .replace(/[۰-۹]/g, d => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d))).replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
     .filter(w => w && !SUFFIXES.has(w));
 }
