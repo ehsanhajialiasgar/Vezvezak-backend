@@ -36,10 +36,16 @@ await t('the flag check runs BEFORE anything can reach the model (env.AI / resol
   assert.ok(gate < model, 'the flag gate must precede every env.AI / resolveIntent reference');
 });
 
-await t('wrangler.toml declares the flag and DEFAULTS IT OFF (never "1")', () => {
+await t('wrangler.toml declares the flag; "1" only with the predeploy policy check', () => {
   const m = TOML.match(/AI_NORMALIZE_ENABLED\s*=\s*"([^"]*)"/);
   assert.ok(m, 'AI_NORMALIZE_ENABLED must be declared in wrangler.toml [vars]');
-  assert.notEqual(m[1], '1', 'AI_NORMALIZE_ENABLED must not be committed as "1" (default off)');
+  // ON since 2026-09-16 — deliberately, after privacy publish 5. Re-anchored: the flag must be declared, and turning it
+  // on is only allowed together with the predeploy check that ties it to the published §5.
+  assert.ok(['0', '1'].includes(m[1]), 'AI_NORMALIZE_ENABLED must be "0" or "1"');
+  if (m[1] === '1') {
+    const gate = readFileSync('scripts/policy-before-deploy-gate.mjs', 'utf8');
+    assert.match(gate, /AI_NORMALIZE_ENABLED: \{ absent: 'no search text reaches any language model today'/);
+  }
 });
 
 console.log(`\nai-normalize flag gate: ${passed}/3 checks passed`);

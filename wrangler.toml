@@ -34,12 +34,11 @@ enabled = false
 # Non-secret vars:
 [vars]
 MAIL_FROM = "Vezvezak <noreply@vezvezak.com>"
-# AI FEATURE FLAG — DEFAULT OFF, fail-closed. /ai/normalize sends the search query to Workers AI
-# (@cf/meta/m2m100-1.2b). Keeping this "0" is what keeps privacy §6 ("no data to any AI provider
-# today") true — a route stays dark until the flag is flipped HERE, a committed + reviewable change,
-# never by a bare `wrangler deploy`. Re-run the live translation harness (see src/translate.js,
-# BUILT-HELD) before ever setting it to "1".
-AI_NORMALIZE_ENABLED = "0"
+# AI FEATURE FLAG — ON since 2026-09-16 (founder, after privacy publish 5 went live: site 3a6f3d6). /ai/normalize sends
+# every search query to Workers AI (llama-3.3-70b) to resolve the product meant (src/translate.js; live harness recorded
+# there). Flipping it is a committed, reviewable change; the predeploy gate refuses "1" unless the deployed policy §5
+# describes it and no longer says "no search text reaches any language model today".
+AI_NORMALIZE_ENABLED = "1"
 # MODERATION FLAG — DEFAULT OFF, fail-closed. moderateReview() and moderateCatalogItem() send an app
 # review's text, or a listing's title/description/brand/model, to Workers AI
 # (@cf/meta/llama-3.3-70b-instruct-fp8-fast). Until 2026-09-03 the ONLY thing holding privacy §5
@@ -67,5 +66,6 @@ AFFILIATE_ENABLED = "0"
 # until the next deploy wipes it (keep_vars is not set) — a published sentence (privacy §5) held by CONFIG outside
 # the repo, the class removed from the policy. Declared here, "0" is the repo's statement and every deploy resets
 # the deployed value to it. scripts/lib/ai-chat-live.mjs (client repo) reads exactly this line.
-# Flipping this to "1" is a committed, reviewable change and REQUIRES updating privacy §5 first.
-AI_CHAT_ENABLED = "0"
+# ON since 2026-09-16 (founder, after publish 5). Signed-in, Pro/Max weekly turns (usage.AI_WEEKLY_TURNS). The predeploy
+# gate refuses "1" unless the deployed policy §5 describes the assistant.
+AI_CHAT_ENABLED = "1"

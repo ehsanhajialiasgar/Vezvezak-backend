@@ -118,8 +118,18 @@ const baseRoutes = routesOf(execSync(`git show ${BASELINE}:src/index.js`, { enco
 if (!headRoutes.size || !baseRoutes.size) fails.push(`✗ COULD NOT VERIFY — routes derived: HEAD ${headRoutes.size}, ${BASELINE} ${baseRoutes.size}`);
 const newRoutes = [...headRoutes].filter(r => !baseRoutes.has(r) && FALSIFIED_BY_ROUTE[r]);
 
+// A FLAG turned on in wrangler.toml must match the DEPLOYED policy (2026-09-16, publish 5): the sentence that the flag
+// makes false must be gone, and the sentence that describes what it now does must be there. Read from this repo's
+// wrangler.toml — the value every deploy writes.
+const FLAG_POLICY = {
+  AI_NORMALIZE_ENABLED: { absent: 'no search text reaches any language model today', present: 'Every search you type is sent to an open-source language model' },
+  AI_CHAT_ENABLED: { present: 'we send your question and a summary of the results on your screen' },
+};
+const TOML_TEXT = readFileSync('wrangler.toml', 'utf8');
+const flagsOn = Object.keys(FLAG_POLICY).filter(f => new RegExp(`^${f}\\s*=\\s*"1"`, 'm').test(TOML_TEXT));
+
 let page = '';
-if (fresh.length || newRoutes.length) {
+if (fresh.length || newRoutes.length || flagsOn.length) {
   try {
     const r = await fetch(`${POLICY_URL}?gate=${Date.now()}`, { headers: { 'Cache-Control': 'no-cache', 'User-Agent': 'vezvezak-policy-before-deploy' } });
     page = r.ok ? (await r.text()).replace(/<[^>]*>/g, ' ').replace(/&rsquo;/g, "'").replace(/\s+/g, ' ') : '';
@@ -131,6 +141,12 @@ for (const c of fresh) {
   else if (page && !page.toLowerCase().includes(PHRASE[c].toLowerCase())) fails.push(`✗ ${c} — phrase "${PHRASE[c]}" is not on the DEPLOYED policy. Publish the policy before this deploy.`);
 }
 
+for (const f of flagsOn) {
+  const { absent, present } = FLAG_POLICY[f];
+  if (page && absent && page.includes(absent)) fails.push(`✗ ${f} is "1" and the deployed policy still says "${absent}". Publish the corrected text before this deploy.`);
+  if (page && present && !page.includes(present)) fails.push(`✗ ${f} is "1" and the deployed policy does not say "${present}". Publish the text that describes it before this deploy.`);
+}
+console.log(`  field of view: flags on in wrangler.toml checked against the deployed policy: ${flagsOn.join(', ') || '—'}`);
 for (const r of newRoutes) if (page && page.includes(FALSIFIED_BY_ROUTE[r])) fails.push(`✗ route ${r} is new since ${BASELINE} and the deployed policy still says "${FALSIFIED_BY_ROUTE[r]}". Publish the corrected text before this deploy.`);
 
 console.log(`  field of view: routes HEAD ${headRoutes.size} / ${BASELINE} ${baseRoutes.size}, new route(s) that falsify a published sentence: ${newRoutes.join(', ') || '—'}`);
