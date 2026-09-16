@@ -119,14 +119,11 @@ CREATE TABLE IF NOT EXISTS referral_codes (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Local job postings (submit + browse nearby). Introductions only (Art.3).
-CREATE TABLE IF NOT EXISTS jobs (
-  id TEXT PRIMARY KEY, user_id TEXT, title TEXT NOT NULL, business TEXT NOT NULL,
-  employment_type TEXT, description TEXT, address TEXT, phone TEXT,
-  latitude REAL, longitude REAL, status TEXT NOT NULL DEFAULT 'live', submitted_at TEXT NOT NULL,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_jobs_geo ON jobs(latitude, longitude);
+-- jobs + influencers were DROPPED 2026-09-16 (routes deleted 61afb45; no app path; nothing in the policy describes
+-- them). Same pattern as ads/coupons below: the drop runs against production only in the deploy session, AFTER the
+-- Worker that no longer touches them is live — see migrations_drop_jobs_influencers.sql.
+DROP INDEX IF EXISTS idx_jobs_geo;
+DROP TABLE IF EXISTS jobs;
 
 -- The advertising subsystem (ads / coupons / luxury offers) was REMOVED entirely
 -- (Ehsan 2026-08-13): a dormant paid-placement mechanism in a product whose central
@@ -146,13 +143,7 @@ CREATE TABLE IF NOT EXISTS verifications (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
--- Influencer self-listings.
-CREATE TABLE IF NOT EXISTS influencers (
-  id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL, handle TEXT NOT NULL,
-  offer TEXT, phone TEXT, website TEXT, latitude REAL, longitude REAL,
-  status TEXT NOT NULL DEFAULT 'pending', submitted_at TEXT NOT NULL,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-);
+DROP TABLE IF EXISTS influencers;
 
 
 -- Commission attribution. A click is registered when the user taps through to a
