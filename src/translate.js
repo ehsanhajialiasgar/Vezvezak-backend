@@ -16,6 +16,9 @@
 // else is UNRESOLVED — never a guess passed on as the user's product.
 import { sha256 } from './lib.js';
 
+// EXAMPLES (2026-09-16): no worked "could not tell" example. With the Japanese one the model copied that sentence for
+// Tagalog, Chinese, Korean and English inputs; without it, 115/120 twice and 2 wrong products (with it 114/113, 3);
+// two examples (Spanish + Russian) gave English sentences to Tagalog queries — same script, so no check can catch it.
 // MODEL (founder 2026-09-16, from the 20-language eval, docs/intent-eval): llama-4-scout + this prompt scored 114 and 113
 // of 120 (llama-3.3-70b + the first prompt: 106 and 105), 3 wrong products (vs 5–6), p90 ~670–800 ms (vs 1.1–1.7 s), at
 // ~$0.000095 per uncached query (vs ~$0.000082). It fixed Pashto (2→5/6) and Amharic (3→6/6). NO retry: a second ask
@@ -36,8 +39,7 @@ Examples:
 sartén → frying pan
 कप → cup
 кроссовки Nike 42 → Nike sneakers size 42
-کاور iPhone 15 Pro → iPhone 15 Pro case
-こんにちは → ${UNKNOWN} どの商品をお探しか分かりませんでした。`;
+کاور iPhone 15 Pro → iPhone 15 Pro case`;
 
 // A reply is in the user's writing system when it contains a letter from the same area of Unicode as the FIRST LETTER
 // of what the user typed. A property of the text, not a language list: Latin (U+0000–U+02FF) counts as one area, the
