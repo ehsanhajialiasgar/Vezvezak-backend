@@ -321,7 +321,8 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_name_at ON telemetry (name, at);
 -- the raw query is never stored, there is no user id and no IP. A query translation is a language
 -- fact, not private user content; this caches for latency/cost only (same rule as Places).
 CREATE TABLE IF NOT EXISTS translation_cache (
-  k          TEXT PRIMARY KEY,   -- sha256(source_lang || ' ' || query)
-  translated TEXT NOT NULL,
+  k          TEXT PRIMARY KEY,   -- sha256(namespace || query); no raw query, no user, no IP
+  translated TEXT NOT NULL,      -- English search terms, or "[[UNKNOWN]] <sentence>"; kept 30 days (translate.js)
   at         INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_translation_cache_at ON translation_cache(at);
