@@ -38,7 +38,8 @@ await t('reviews, app_reviews and merchant listings are DELETED (full erasure)',
 // the founder stated 2026-09-15: ENDPOINT OPEN, PATH CLOSED — no reachable app path writes them, so our own app
 // cannot create an orphan today; a caller outside the app still can.
 await t('no merchant listing or review can be written without an account; other anonymous writes are declared, not hidden', () => {
-  const OPEN_FOR_FOUNDER = new Set(['app_reviews', 'jobs', 'influencers', 'feedback']);
+  // jobs + influencers routes were DELETED 2026-09-15, so their anonymous INSERTs are gone from the derivation.
+  const OPEN_FOR_FOUNDER = new Set(['app_reviews', 'feedback']);
   const fns = IDX.split(/\n(?=(?:export\s+)?async function )/);
   const orphanTables = fns.filter(f => /claims\?\.sub \|\| null/.test(f))
     .flatMap(f => [...f.matchAll(/INSERT INTO (\w+)/g)].map(m => m[1]));

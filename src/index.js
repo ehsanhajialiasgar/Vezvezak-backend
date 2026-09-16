@@ -557,54 +557,11 @@ async function referralClaim(request, env) {
 
 // ── jobs / ads / verification / influencers / coupons / luxury ───────────────
 
-// Haversine distance in miles (for "nearby" queries without PostGIS).
-function milesBetween(lat1, lon1, lat2, lon2) {
-  const R = 3958.8, toR = Math.PI / 180;
-  const dLat = (lat2 - lat1) * toR, dLon = (lon2 - lon1) * toR;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.asin(Math.sqrt(a));
-}
-
-async function submitLimited(request, env, bucket, perDay = 10) {
-  const claims = await requireAuth(request, env);
-  const rl = await rateLimit(env, `${bucket}:${claims?.sub || (await ipHash(request, env))}`, perDay, 24 * 60 * 60 * 1000);
-  return { claims, allowed: rl.allowed };
-}
-
-async function jobSubmit(request, env) {
-  const b = await readJson(request); if (!b) return fail(400, 'Invalid request.');
-  if (!String(b.title || '').trim() || !String(b.business || '').trim()) return fail(400, 'Title and business are required.');
-  const { claims, allowed } = await submitLimited(request, env, 'job');
-  if (!allowed) return fail(429, 'Too many submissions today.');
-  const id = uid('job');
-  await env.DB.prepare('INSERT INTO jobs (id,user_id,title,business,employment_type,description,address,phone,latitude,longitude,status,submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-    .bind(id, claims?.sub || null, b.title.trim(), b.business.trim(), b.employmentType || null,
-      (b.description || '').trim() || null, (b.address || '').trim() || null, (b.phone || '').trim() || null,
-      Number.isFinite(b.latitude) ? b.latitude : null, Number.isFinite(b.longitude) ? b.longitude : null,
-      'live', b.submittedAt || nowIso()).run();
-  return ok({ id });
-}
-
-async function jobsNearby(request, env) {
-  // Coordinates come in the POST BODY, never the URL query (Ehsan 2026-08-11) — a
-  // URL is captured by any request log; a body is not. Coordinates are already
-  // coarse (~110m) on the device.
-  const body = await readJson(request) || {};
-  const lat = parseFloat(body.lat); const lng = parseFloat(body.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return json(200, { jobs: [] });
-  // Bounding box (~40mi) then exact distance — cheap and index-friendly.
-  const d = 0.6;
-  const { results } = await env.DB.prepare(
-    "SELECT id,title,business,employment_type,description,address,phone,latitude,longitude FROM jobs " +
-    'WHERE status = ? AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? LIMIT 200',
-  ).bind('live', lat - d, lat + d, lng - d, lng + d).all();
-  const jobs = (results || []).map(r => ({
-    id: r.id, title: r.title, business: r.business, employmentType: r.employment_type,
-    description: r.description || undefined, address: r.address || undefined, phone: r.phone || undefined,
-    distance: (r.latitude != null && r.longitude != null) ? Math.round(milesBetween(lat, lng, r.latitude, r.longitude) * 10) / 10 : undefined,
-  })).filter(j => j.distance == null || j.distance <= 40).sort((a, b) => (a.distance ?? 999) - (b.distance ?? 999));
-  return json(200, { jobs });
-}
+// /jobs/submit, /jobs/nearby and /influencers/submit were DELETED (Ehsan 2026-09-15). /jobs/submit published a job
+// immediately and without a session; /jobs/nearby served its address and phone to anyone who sent coordinates; the
+// influencer route stored name/phone with no session. No reachable app path used any of them — the honest version of
+// a feature that cannot work is its absence (the property/travel call). Existing rows are a production-data decision
+// (founder's); accountDelete still removes a user's rows and export still returns them.
 
 async function verificationStart(request, env) {
   const b = await readJson(request); if (!b) return fail(400, 'Invalid request.');
@@ -622,20 +579,6 @@ async function verificationStatus(request, env, url) {
   const kind = url.searchParams.get('kind') || 'merchant';
   const row = await env.DB.prepare('SELECT status FROM verifications WHERE user_id = ? AND kind = ?').bind(claims.sub, kind).first();
   return json(200, { status: row?.status || 'unsubmitted' });
-}
-
-async function influencerSubmit(request, env) {
-  const b = await readJson(request); if (!b) return fail(400, 'Invalid request.');
-  if (!String(b.name || '').trim() || !String(b.handle || '').trim()) return fail(400, 'Name and handle are required.');
-  const { claims, allowed } = await submitLimited(request, env, 'inf');
-  if (!allowed) return fail(429, 'Too many submissions today.');
-  const id = uid('inf');
-  await env.DB.prepare('INSERT INTO influencers (id,user_id,name,handle,offer,phone,website,latitude,longitude,status,submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-    .bind(id, claims?.sub || null, b.name.trim(), b.handle.trim(), (b.offer || '').trim() || null,
-      (b.phone || '').trim() || null, (b.website || '').trim() || null,
-      Number.isFinite(b.latitude) ? b.latitude : null, Number.isFinite(b.longitude) ? b.longitude : null,
-      'pending', b.submittedAt || nowIso()).run();
-  return ok({ id, status: 'pending' });
 }
 
 // Operator-curated retailer price-match policies. Honest empty until seeded —
@@ -1286,11 +1229,8 @@ export default {
       if (get && p === '/referral/code') return referralCode(request, env);
       if (post && p === '/referral/claim') return referralClaim(request, env);
 
-      if (post && p === '/jobs/submit') return jobSubmit(request, env);
-      if (post && p === '/jobs/nearby') return jobsNearby(request, env);
       if (post && p === '/verification/start') return verificationStart(request, env);
       if (get && p === '/verification/status') return verificationStatus(request, env, url);
-      if (post && p === '/influencers/submit') return influencerSubmit(request, env);
       if (get && p === '/pricematch/policies') return priceMatchPolicies(request, env, url);
       if (post && p === '/feedback/submit') return feedbackSubmit(request, env);
       if (post && p === '/human/verify') return humanVerify(request, env);
