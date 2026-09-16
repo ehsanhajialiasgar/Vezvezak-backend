@@ -81,7 +81,7 @@ let DatabaseSync;
 try { ({ DatabaseSync } = await import('node:sqlite')); }
 catch { console.log('\nNOTICE: node:sqlite unavailable — behavioral erasure test skipped (structure covered above).'); console.log(`\n  ${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0); }
 
-const { signJwt } = await import('../src/lib.js');
+const { signJwt, bucketSubject } = await import('../src/lib.js');
 const { accountDelete, accountExport } = await import('../src/index.js');
 
 const db = new DatabaseSync(':memory:');
@@ -127,10 +127,15 @@ function seed(uid, identifier, tag) {
   db.prepare('INSERT INTO consumed_searches (user_id,search_id,kind,window_start,photos_used,created_at) VALUES (?,?,?,?,?,?)').run(uid, 'S1', 'local', 1, 0, iso);
   db.prepare('INSERT INTO otp_codes (id,identifier,purpose,code_hash,expires_at,created_at) VALUES (?,?,?,?,?,?)').run('otp_' + tag, identifier, 'signin', 'H', 1, 1);
   db.prepare('INSERT INTO reset_tokens (token,identifier,expires_at) VALUES (?,?,?)').run('tok_' + tag, identifier, 1);
-  db.prepare('INSERT INTO rate_limits (bucket,count,window_at) VALUES (?,?,?)').run('login:' + identifier, 1, 1);
+  // Bucket names hold a keyed hash of the subject (lib.rateLimit, 2026-09-15) — seeded the way rateLimit stores them.
+  const now = Date.now();
+  db.prepare('INSERT INTO rate_limits (bucket,count,window_at) VALUES (?,?,?)').run('login:' + BUCKET[identifier], 1, now);
+  db.prepare('INSERT INTO rate_limits (bucket,count,window_at) VALUES (?,?,?)').run('merchant:' + BUCKET[uid], 1, now);
 }
+const BUCKET = {};
+for (const x of ['usr_del', ID, 'usr_keep', 'other_user@example.test']) BUCKET[x] = await bucketSubject(x, env);
 seed('usr_del', ID, 'del');
-seed('usr_keep', 'other@example.test', 'keep');
+seed('usr_keep', 'other_user@example.test', 'keep');   // an '_' in the identifier: a LIKE wildcard if unescaped
 
 async function call(fn, token, body) {
   const req = { headers: { get: (k) => (k.toLowerCase() === 'authorization' ? (token ? `Bearer ${token}` : null) : null) }, json: async () => body || {} };
@@ -186,7 +191,9 @@ await t('the user\'s content is truly gone (reviews, merchant listing, variant, 
   assert.equal(db.prepare("SELECT COUNT(*) c FROM merchants WHERE id='mer_del'").get().c, 0);
   assert.equal(db.prepare("SELECT COUNT(*) c FROM catalog_variants WHERE id='var_del'").get().c, 0, 'the child variant is gone too');
   assert.equal(db.prepare("SELECT COUNT(*) c FROM referrals WHERE referrer_code='CODE_del'").get().c, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM rate_limits WHERE bucket = ?').get('login:' + ID).c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM rate_limits WHERE bucket = ?').get('login:' + BUCKET[ID]).c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM rate_limits WHERE bucket = ?').get('merchant:' + BUCKET['usr_del']).c, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM rate_limits WHERE bucket LIKE '%user-under-test%'").get().c, 0, 'no plaintext identifier is stored at all');
 });
 
 console.log('\nDeletion touches ONLY the target account');
@@ -195,6 +202,7 @@ await t('the second user\'s rows are completely untouched', () => {
   assert.equal(db.prepare("SELECT COUNT(*) c FROM reviews WHERE ip_hash='IPHASH_keep'").get().c, 1);
   assert.equal(db.prepare("SELECT COUNT(*) c FROM catalog_variants WHERE id='var_keep'").get().c, 1);
   assert.equal(db.prepare("SELECT COUNT(*) c FROM jobs WHERE user_id='usr_keep'").get().c, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM rate_limits WHERE bucket IN (?, ?)').get('login:' + BUCKET['other_user@example.test'], 'merchant:' + BUCKET['usr_keep']).c, 2, 'the other account\'s counters survive');
 });
 
 console.log(`\n  ${pass} passed, ${fail} failed`);

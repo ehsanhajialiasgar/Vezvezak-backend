@@ -134,11 +134,32 @@ export function normalizeIdentifier(raw) {
 export const channelOf = id => (id.includes('@') ? 'email' : 'phone');
 
 // ── rate limiting (fixed window, D1-backed) ─────────────────────────────────
-export async function rateLimit(env, bucket, limit, windowMs) {
+// RATE-LIMIT KEYS HOLD NO IDENTIFIER, AND EXPIRED COUNTERS ARE REMOVED (Ehsan 2026-09-15).
+// The bucket name used to be stored as written — `login:<email>`, `otp:<phone>` — in plain text, and a row was only
+// ever overwritten, never removed: a mistyped email stayed forever. Now the part after the LAST ':' is replaced by a
+// keyed hash (the prefix stays readable), so no email, phone, account id or IP is stored here; and every window reset
+// removes counters older than the longest window any caller uses. Rows written before this change are therefore gone
+// within RATE_LIMIT_MAX_WINDOW_MS of the first reset after deploy.
+export const RATE_LIMIT_MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export async function bucketSubject(subject, env) {
+  return sha256(`rl:${subject}:${env.JWT_SECRET || ''}`);
+}
+
+async function storedBucket(bucket, env) {
+  const i = bucket.lastIndexOf(':');
+  if (i < 0) return `${bucket}:${await bucketSubject('', env)}`;
+  return `${bucket.slice(0, i)}:${await bucketSubject(bucket.slice(i + 1), env)}`;
+}
+
+export async function rateLimit(env, bucketName, limit, windowMs) {
+  if (windowMs > RATE_LIMIT_MAX_WINDOW_MS) throw new Error(`rateLimit window ${windowMs} exceeds RATE_LIMIT_MAX_WINDOW_MS — raise the purge bound first`);
+  const bucket = await storedBucket(bucketName, env);
   const now = Date.now();
   const row = await env.DB.prepare('SELECT count, window_at FROM rate_limits WHERE bucket = ?')
     .bind(bucket).first();
   if (!row || now - row.window_at > windowMs) {
+    await env.DB.prepare('DELETE FROM rate_limits WHERE window_at < ?').bind(now - RATE_LIMIT_MAX_WINDOW_MS).run();
     await env.DB.prepare(
       'INSERT INTO rate_limits (bucket, count, window_at) VALUES (?, 1, ?) ' +
       'ON CONFLICT(bucket) DO UPDATE SET count = 1, window_at = ?',

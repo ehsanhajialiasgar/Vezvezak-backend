@@ -29,8 +29,7 @@
 
 import {
   CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword,
-  signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor,
-} from './lib.js';
+  signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject } from './lib.js';
 import { translateQuery, cacheGet, cacheSet } from './translate.js';
 import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
@@ -304,9 +303,14 @@ export async function accountDelete(request, env) {
   stmts.push(P('DELETE FROM otp_codes WHERE identifier = ?', identifier));
   stmts.push(P('DELETE FROM reset_tokens WHERE identifier = ?', identifier));
   if (codeRow?.code) stmts.push(P('DELETE FROM referrals WHERE referrer_code = ?', codeRow.code)); // the user's OUTBOUND invites only
-  // Ephemeral abuse counters that embed the identifier / user id (they self-expire too).
-  stmts.push(P('DELETE FROM rate_limits WHERE bucket LIKE ?', `%${identifier}%`));
-  stmts.push(P('DELETE FROM rate_limits WHERE bucket LIKE ?', `%${uid}%`));
+  // Abuse counters keyed by this identifier / account. Bucket names hold a keyed hash of the subject, never the value
+  // (lib.rateLimit, 2026-09-15), so match the exact hash suffix — no plaintext, and no LIKE wildcard from an email's
+  // "_" or "%" can reach another account's counter (the hash alphabet is base64url; "_" is escaped below). They are
+  // also removed after RATE_LIMIT_MAX_WINDOW_MS by the purge — the old comment said "they self-expire", which was false.
+  for (const subj of [identifier, uid]) {
+    const h = (await bucketSubject(subj, env)).replace(/[\\%_]/g, c => `\\${c}`);
+    stmts.push(P("DELETE FROM rate_limits WHERE bucket LIKE ? ESCAPE '\\'", `%:${h}`));
+  }
   // The account itself LAST.
   stmts.push(P('DELETE FROM users WHERE id = ?', uid));
 
