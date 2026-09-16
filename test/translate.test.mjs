@@ -24,8 +24,10 @@ await test('[[UNKNOWN]], empty, non-Latin or over-long answers are unresolved', 
   assert.equal(acceptIntent('x', 'a'.repeat(201)).resolved, false);
 });
 await test('the prompt asks for intent in any language, English terms only, and [[UNKNOWN]] when unsure', () => {
-  assert.match(INTENT_PROMPT, /any language or script/);
-  assert.match(INTENT_PROMPT, /Never read a word as a look-alike/);
+  assert.match(INTENT_PROMPT, /any of the world's languages and scripts/);
+  assert.match(INTENT_PROMPT, /not from the script alone/, 'a shared script or spelling is not the language');
+  assert.match(INTENT_PROMPT, /Examples:/, 'worked examples (none from the eval set)');
+  for (const w of ['نمک', 'میز', 'silla', 'salt', 'chair']) assert.ok(!INTENT_PROMPT.includes(w), `the eval word ${w} is not an example`);
   assert.match(INTENT_PROMPT, /model numbers/);
   assert.ok(INTENT_PROMPT.includes(UNKNOWN));
 });
