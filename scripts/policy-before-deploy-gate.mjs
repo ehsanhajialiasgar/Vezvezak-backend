@@ -71,14 +71,19 @@ catch (e) { console.error(`POLICY BEFORE DEPLOY — BLOCKED: COULD NOT DERIVE TH
 console.log(`  live commit: ${BASELINE} (${BASELINE_HOW})`);
 const POLICY_URL = 'https://vezvezak.com/privacy/';
 
-// A phrase per column the policy must carry before a deploy may write it. Empty for the five IAP/comp columns on
-// purpose: §2 does not describe them yet, so the deploy is blocked until the text is published and the phrase added.
+// A phrase per column the policy must carry before a deploy may write it. The five IAP/comp columns had none until
+// publish 4 described them; the phrase follows the published text, never the other way round.
 const PHRASE = {
   // The baseline Worker only READ user_plans (plans were set owner-side); /iap/validate and /comp/redeem write the row.
   // §2 already carries the tier, stored against the account: "Your subscription tier and search counts".
   'user_plans.plan': 'Your subscription tier',
   'user_plans.user_id': 'Your subscription tier',
-  // expires_at, source, original_transaction_id, environment, comp_redeemed: NO phrase — §2 does not describe them.
+  // Publish 4 (site c179dce, live 2026-09-16) — §2 "If you have a paid plan: …", the approved wording:
+  'user_plans.expires_at': 'when it expires',
+  'user_plans.source': 'from a promotional code',
+  'user_plans.original_transaction_id': 'original transaction ID',
+  'user_plans.environment': 'test (sandbox)',
+  'user_plans.comp_redeemed': 'hash of each code you redeemed',
 };
 
 // A published SENTENCE a new route falsifies. Derived: the routes are read from src/index.js at HEAD and at BASELINE;
