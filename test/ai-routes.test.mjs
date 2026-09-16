@@ -72,6 +72,12 @@ await t('[[UNKNOWN]] → unresolved "unknown", and that answer is cached too', a
   const b = await call(aiNormalize, env(), { query: 'كيف' });
   assert.deepEqual([a.body.resolved, a.body.reason, b.body.reason, calls.length], [false, 'unknown', 'unknown', 1]);
 });
+await t('[[UNKNOWN]] with a sentence in the user\'s language → the sentence is returned, and served from the cache the same way', async () => {
+  calls = []; answers = { 'سلام': '[[UNKNOWN]] لطفا محصول مورد نظر خود را به روش دیگری بنامید' };
+  const a = await call(aiNormalize, env(), { query: 'سلام' });
+  const b = await call(aiNormalize, env(), { query: 'سلام' });
+  assert.deepEqual([a.body.reason, a.body.message, b.body.message, calls.length], ['unknown', 'لطفا محصول مورد نظر خود را به روش دیگری بنامید', 'لطفا محصول مورد نظر خود را به روش دیگری بنامید', 1]);
+});
 await t('a model number the answer dropped → rejected (never a guessed product)', async () => {
   answers = { 'هدفون WH-1000XM5': 'wireless headphones' };
   const r = await call(aiNormalize, env(), { query: 'هدفون WH-1000XM5' });

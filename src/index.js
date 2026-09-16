@@ -1119,7 +1119,10 @@ export async function aiNormalize(request, env) {
 
   // Cache first: a hit costs nothing and does NOT touch the daily ceiling. [[UNKNOWN]] is cached too.
   const hit = await cacheGet(env, query, 'intent');
-  if (hit === UNKNOWN) return ok({ query, resolved: false, reason: 'unknown' });
+  if (hit != null && hit.startsWith(UNKNOWN)) {
+    const message = hit.slice(UNKNOWN.length).trim();
+    return ok(message ? { query, resolved: false, reason: 'unknown', message } : { query, resolved: false, reason: 'unknown' });
+  }
   if (hit != null) return ok({ query: hit, resolved: true });
 
   const gate = await rateLimit(env, 'ai:normalize', NORMALIZE_DAILY_MAX, 86_400_000);
@@ -1129,8 +1132,9 @@ export async function aiNormalize(request, env) {
   try { r = await resolveIntent(env, query); }
   catch { return ok({ query, resolved: false, reason: 'model_error' }); }
   if (r.resolved) await cacheSet(env, query, 'intent', r.query, Date.now());
-  else if (r.reason === 'unknown') await cacheSet(env, query, 'intent', UNKNOWN, Date.now());
-  return r.resolved ? ok({ query: r.query, resolved: true }) : ok({ query, resolved: false, reason: r.reason });
+  else if (r.reason === 'unknown') await cacheSet(env, query, 'intent', r.message ? `${UNKNOWN} ${r.message}` : UNKNOWN, Date.now());
+  if (r.resolved) return ok({ query: r.query, resolved: true });
+  return ok(r.message ? { query, resolved: false, reason: r.reason, message: r.message } : { query, resolved: false, reason: r.reason });
 }
 
 // ── /ai/chat — STAGE 1: GROUNDED-IN-RESULTS ONLY (Ehsan 2026-08-27) ────────────

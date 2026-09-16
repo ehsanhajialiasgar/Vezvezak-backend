@@ -2,7 +2,7 @@
 // tests: the INTENT they guarded — a model number must survive, a failed model never becomes a guessed product — is kept).
 // Run: node test/translate.test.mjs
 import assert from 'node:assert/strict';
-import { acceptIntent, resolveIntent, INTENT_PROMPT, INTENT_MODEL, UNKNOWN } from '../src/translate.js';
+import { acceptIntent, resolveIntent, sharesWritingSystem, INTENT_PROMPT, INTENT_MODEL, UNKNOWN } from '../src/translate.js';
 
 let passed = 0;
 const test = async (name, fn) => { await fn(); passed++; console.log('  ok -', name); };
@@ -41,6 +41,27 @@ await test('resolveIntent sends the whole query, with the prompt, to the chat mo
 });
 await test('a model error propagates (the route maps it to unresolved — never to the raw query as if resolved)', async () => {
   await assert.rejects(resolveIntent({ AI: { run: async () => { throw new Error('down'); } } }, 'نمک'));
+});
+
+await test('[[UNKNOWN]] carries the model\'s sentence in the user\'s language — only when it is in the user\'s writing system', () => {
+  assert.deepEqual(acceptIntent('كيف حالك', '[[UNKNOWN]] لا أستطيع معرفة المنتج الذي تبحث عنه'),
+    { resolved: false, reason: 'unknown', message: 'لا أستطيع معرفة المنتج الذي تبحث عنه' });
+  assert.equal(acceptIntent('Բարեւ', '[UNKNOWN] Ես չգիտեմ').message, 'Ես չգիտեմ', 'a single-bracket token is still the token');
+  assert.equal(acceptIntent('این چند وات است؟', '[[UNKNOWN]]只能回答关于屏幕上的结果的问题').message, undefined, 'a Chinese sentence for a Persian query is dropped');
+  assert.equal(acceptIntent('মালী', 'gardener or [[UNKNOWN]] আমি বুঝতে পারিনি').resolved, false, 'a guess next to the token is not a resolution');
+  assert.equal(acceptIntent('x', '[[UNKNOWN]] see https://example.com').message, undefined);
+});
+await test('writing system is a property of the code points, not a list', () => {
+  assert.equal(sharesWritingSystem('نمک', 'نمی‌دانم'), true);
+  assert.equal(sharesWritingSystem('Kumusta', 'Pakisabi sa akin'), true);
+  assert.equal(sharesWritingSystem('café', 'je ne sais pas'), true);
+  assert.equal(sharesWritingSystem('桌子', 'テーブルが見つかりません'), false, 'Han first letter, a kana-only reply');
+  assert.equal(sharesWritingSystem('이것은', '모르겠습니다'), true);
+  assert.equal(sharesWritingSystem('این', '只能回答'), false);
+  assert.equal(sharesWritingSystem('123', 'anything'), false, 'no letter in the question → nothing to match');
+});
+await test('the prompt asks for the "could not tell" sentence in the language the person wrote in', () => {
+  assert.match(INTENT_PROMPT, /one short sentence in the language the person wrote in/);
 });
 
 console.log(`\n${passed} passed`);
