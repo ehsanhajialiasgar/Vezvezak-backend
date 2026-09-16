@@ -34,11 +34,10 @@ import { join } from 'node:path';
 
 // Uploads made before deploys carried a tag: script etag → commit. Each entry is evidence, not belief — it is used
 // only while Cloudflare reports that exact etag as live.
-// 77ff5c8b… = version 13a34f7b (uploaded 2026-09-10T12:41Z, two minutes after 1d026f5) and the secret change 811f8393.
-// Probed 2026-09-16, not read from a dashboard: POST /extract answers 401 (route present — before a49358d deleted
-// it) and /affiliate/click answers 503 affiliate_disabled (0b1e2dc or later); src is identical 0b1e2dc..1d026f5.
-// The constant it replaces said 531bee3, which was never deployed; nothing checked it.
-const UNTAGGED = { '77ff5c8b2c183668fc535651aa95319c4436264cdda4d237bfb226d559682546': '1d026f5' };
+// Empty since 2026-09-16 (runbook step 4): the 1d026f5 entry (etag 77ff5c8b…, versions 13a34f7b / 811f8393 — found by
+// the /extract probe) was removed once tagged deploys existed and the derivation had resolved through a tag
+// (23344686) and through a same-etag secret change (48d1bab6 → 23344686). Add an entry only with probe evidence.
+const UNTAGGED = {};
 const WRANGLER = (JSON.parse(readFileSync('package.json', 'utf8')).scripts.deploy.match(/^npx --yes (wrangler@\d+\.\d+\.\d+) deploy --tag /) || [])[1];
 const wrangler = args => JSON.parse(execSync(`npx --yes ${WRANGLER} ${args} --json`, { encoding: 'utf8', env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 32e6 }));
 const TAG = v => v?.annotations?.['workers/tag'];
