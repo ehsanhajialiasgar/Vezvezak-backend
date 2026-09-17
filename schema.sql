@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS merchants (
   user_id      TEXT,
   store_name   TEXT NOT NULL,
   category     TEXT,
-  biz_type     TEXT,                        -- retail | wholesale | services | food | online
+  biz_type     TEXT,                        -- retail | wholesale | services | food | online | other
   address      TEXT NOT NULL,
   latitude     REAL,
   longitude    REAL,
