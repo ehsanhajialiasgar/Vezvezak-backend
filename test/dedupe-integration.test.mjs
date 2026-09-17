@@ -13,7 +13,8 @@ let DatabaseSync;
 try { ({ DatabaseSync } = await import('node:sqlite')); }
 catch { console.log('\nNOTICE: node:sqlite unavailable — dedupe integration test skipped (structure covered by weeklyCaps.test.mjs).'); process.exit(0); }
 
-const { signJwt } = await import('../src/lib.js');
+const { signJwt, bucketSubject } = await import('../src/lib.js');
+const { SEARCH_DAILY_CEILING } = await import('../src/usage.js');
 const { searchConsume } = await import('../src/index.js');
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +60,7 @@ async function call(token, body) {
   return { status: res.status, body: await res.json() };
 }
 const localUsed = (uid) => db.prepare('SELECT local_used FROM weekly_search_usage WHERE user_id=?').get(uid)?.local_used ?? 0;
+const onlineUsed = (uid) => db.prepare('SELECT online_used FROM weekly_search_usage WHERE user_id=?').get(uid)?.online_used ?? 0;
 
 let pass = 0, fail = 0;
 const t = async (n, fn) => { try { await fn(); console.log('  ✅', n); pass++; } catch (e) { console.log('  ❌', n, '\n     ', e.message); fail++; } };
@@ -67,10 +69,18 @@ const pro = await signJwt({ sub: 'usr_pro', identifier: 'x' }, env.JWT_SECRET);
 const free = await signJwt({ sub: 'usr_free', identifier: 'y' }, env.JWT_SECRET);
 const expiredPro = await signJwt({ sub: 'usr_pro_expired', identifier: 'z' }, env.JWT_SECRET);
 
-await t('an EXPIRED Pro subscription gets FREE caps — refused a local slot, against the real schema', async () => {
-  const r = await call(expiredPro, { kind: 'local', vz_sid: 'sid-expired-1' });
-  assert.notEqual(r.status, 200, `an expired Pro plan must not consume a paid slot (got ${r.status})`);
-  assert.equal(localUsed('usr_pro_expired'), 0, 'nothing may be counted against a plan that has expired');
+await t('an EXPIRED Pro subscription gets FREE caps, not paid ones, against the real schema', async () => {
+  // Was "refused a local slot" — true only while the free local cap was 0. The rule being asserted is not
+  // "refused", it is "treated as free": since 2026-09-17 free has 1 local search a week, so an expired Pro gets
+  // exactly that one and is refused the second. A test that read the old number would have quietly become a test
+  // that an expired plan gets nothing at all, which is not the rule.
+  const first = await call(expiredPro, { kind: 'local', searchId: 'sid-expired-1' });
+  assert.equal(first.status, 200, 'an expired Pro is a free user, and a free user has one local search');
+  assert.equal(first.body.plan, 'free', 'the plan reported must be free, never the expired paid one');
+  assert.equal(first.body.cap, 1, 'and the cap must be the FREE cap, not Pro\'s 18');
+  const second = await call(expiredPro, { kind: 'local', searchId: 'sid-expired-2' });
+  assert.equal(second.status, 402, 'the second must be refused — an expired plan never gets paid caps');
+  assert.equal(localUsed('usr_pro_expired'), 1, 'exactly one slot counted against the expired account');
 });
 
 console.log('\nOne search bundle collapses into ONE slot (Text + Nearby share a vz_sid)');
@@ -116,13 +126,52 @@ await t('a photo for a made-up search id (no consumed slot) is refused', async (
   assert.equal(p.status, 402);
 });
 
-console.log('\nFree tier: ZERO billable calls — local AND online both refused (cache-only, 2026-08-23)');
-await t('free is always refused BOTH kinds (local cap 0, online cap 0)', async () => {
-  const l = await call(free, { kind: 'local', searchId: 'F1' });
-  assert.equal(l.status, 402, 'free local must be refused — no Google Places');
-  const o = await call(free, { kind: 'online', searchId: 'F2' });
-  assert.equal(o.status, 402, 'free online must be refused too — no live SerpApi on free (cache-only)');
+console.log('\nFree tier: a REAL weekly searches, and a real wall at the end of it (1 local + 5 online, 2026-09-17)');
+await t('free gets its one local search, and the second is refused', async () => {
+  const first = await call(free, { kind: 'local', searchId: 'F1' });
+  assert.equal(first.status, 200, 'free must get its one live local search');
+  assert.equal(first.body.remaining, 0, 'and it is the only one this week');
+  const second = await call(free, { kind: 'local', searchId: 'F2' });
+  assert.equal(second.status, 402, 'the second local search of the week must be refused');
+  assert.equal(second.body.reason, 'cap_reached');
 });
+await t('free gets five online searches, and the sixth is refused', async () => {
+  for (let i = 1; i <= 5; i++) {
+    const r = await call(free, { kind: 'online', searchId: `FO${i}` });
+    assert.equal(r.status, 200, `free online search ${i} must be allowed`);
+    assert.equal(r.body.remaining, 5 - i, `remaining after online search ${i}`);
+  }
+  const sixth = await call(free, { kind: 'online', searchId: 'FO6' });
+  assert.equal(sixth.status, 402, 'the sixth online search of the week must be refused');
+  assert.equal(sixth.body.reason, 'cap_reached');
+});
+await t('a free bundle still dedupes: the same vz_sid does not spend a second slot', async () => {
+  const again = await call(free, { kind: 'local', searchId: 'F1' });
+  assert.equal(again.status, 200, 'the same bundle must be allowed through');
+  assert.equal(again.body.idempotent, true, 'and must not take a second slot');
+});
+console.log('\nGLOBAL DAILY CEILING — the blast brake that ships with the free weekly count (2026-09-17)');
+await t('at the global daily ceiling the search is refused 429, no slot spent, no row left behind', async () => {
+  // Seed the global bucket at its ceiling — the same row rateLimit() would have written after
+  // SEARCH_DAILY_CEILING.online searches in 24h, for every account together.
+  const bucket = `search:online:${await bucketSubject('global', env)}`;
+  db.prepare('INSERT OR REPLACE INTO rate_limits (bucket, count, window_at) VALUES (?, ?, ?)')
+    .run(bucket, SEARCH_DAILY_CEILING.online, Date.now());
+  const before = onlineUsed('usr_pro');
+  const r = await call(pro, { kind: 'online', searchId: 'CEIL1' });
+  assert.equal(r.status, 429, 'over the global ceiling the answer is 429, not the user cap 402');
+  assert.equal(r.body.reason, 'search_ceiling_global', 'and it says the SERVICE is busy, not that the user is out');
+  assert.equal(onlineUsed('usr_pro'), before, 'no slot may be counted for a search that never happened');
+  const rows = db.prepare('SELECT COUNT(*) c FROM consumed_searches WHERE search_id = ?').get('CEIL1');
+  assert.equal(rows.c, 0, 'the dedupe row must be undone, or a retry after the window reads as already-consumed');
+  db.prepare('DELETE FROM rate_limits WHERE bucket = ?').run(bucket);
+});
+await t('with the ceiling cleared the same search goes through', async () => {
+  const r = await call(pro, { kind: 'online', searchId: 'CEIL1' });
+  assert.equal(r.status, 200, 'the refusal must not have poisoned the bundle id');
+  assert.equal(r.body.idempotent, undefined, 'and it takes its slot now, for the first time');
+});
+
 await t('unauthenticated consume is refused (401)', async () => {
   const r = await call(null, { kind: 'online', searchId: 'Z1' });
   assert.equal(r.status, 401);

@@ -18,17 +18,37 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const WEEKLY_CAPS = {
-  // free = ZERO billable calls, enforced HERE (the client showing 0 is not the
-  // guarantee — this table is). onlinePerWeek went 3→0 on 2026-08-23: even 3 live
-  // SerpApi calls/user/week breaks "free costs us nothing" at scale, and the free
-  // product path was already cache-only, so the 3 never actually fired. Client
-  // mirror: pricingStrategy.ts CONSUMER_TIERS free → onlinePerWeek 0. Change one,
-  // change both (weeklyCapClient.test.mjs / weeklyCaps.test.mjs fail on drift).
-  free: { local: 0,  online: 0   },
+  // FREE IS NOT ZERO ANY MORE (Ehsan 2026-09-17). It was { local: 0, online: 0 }, and the 2026-09-17 cold-install
+  // trace showed what that meant in the product: a free user — signed in or not — never saw a single result. The
+  // free path reads a cache that only the paid path writes, so on a fresh install it is empty forever and every
+  // search ended on one sentence and an em dash. "That is not a free tier, it is a broken app wearing a paywall."
+  //
+  // 1 local + 5 online, chosen on cost: one local (Google Places) search costs what 5.3 online (SerpApi) ones do
+  // ($0.085 vs $0.016, list price, never invoiced), and online is what fills the screen. A fully-active free user
+  // costs $0.072–0.101/week — $0.31–0.43/month — against zero revenue and no conversion data yet.
+  //
+  // THREE CONDITIONS, all of them structural, not promises:
+  //   1. proxy ENFORCE_CAPS='1'. With it off the proxy never calls /search/consume, nothing is counted, and a
+  //      non-zero free cap is unlimited paid search per install. The zero used to be the wall; the count is the
+  //      wall now, so the count has to actually happen. (capsNeedEnforcement.test binds the two.)
+  //   2. SEARCH_DAILY_CEILING below — a global blast brake, so a bug or an abuser cannot spend a month in a day.
+  //   3. the client serves a repeated query from its 24h cache without spending a slot.
+  // Client mirror: pricingStrategy.ts CONSUMER_TIERS free → localPerWeek 1 / onlinePerWeek 5. Change one, change
+  // both (weeklyCapClient.test.mjs / weeklyCaps.test.mjs fail on drift).
+  free: { local: 1,  online: 5   },
   pro:  { local: 18, online: 40  },
   max:  { local: 45, online: 100 },
 };
 
+// GLOBAL DAILY CEILING — a blast brake, not a usage model (Ehsan 2026-09-17, condition 2 of the free weekly searches).
+// Per-user weekly caps bound what one honest account can spend; nothing bounded what the whole system can spend in
+// a day. At list price these two numbers cap a day at 500·$0.085 + 2500·$0.016 = $82.50, and they are sized to
+// carry ~3,500 fully-active free users (500 local/day = 3,500/week = one each; 2,500 online/day = 17,500/week =
+// five each) plus paid traffic on top. Raise them deliberately when real traffic approaches them — a user refused
+// by this ceiling is told the service is busy, never that their own searches are gone.
+// STATED LIMIT: it counts SLOTS (local + online). Photos ride under a consumed local slot (PHOTO_PER_SEARCH), and
+// details/geocode are auth-gated follow-ups that take no slot — neither is under this brake. That gap is recorded.
+export const SEARCH_DAILY_CEILING = { local: 500, online: 2500 };
 // ASSISTANT TURNS per week (Ehsan 2026-09-16; sized 2026-08-28 at ~$0.00024/turn, <1% of a paid plan at the cap).
 // A RUNAWAY control, not a cost model. Free is 0: the assistant is a paid feature, like live search. Counted as rows
 // of kind 'ai' in consumed_searches for the account's current weekly window (no new column, no migration).

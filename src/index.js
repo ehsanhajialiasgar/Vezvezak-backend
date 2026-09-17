@@ -37,7 +37,7 @@ import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
 import {
-  WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, resolvePlan, planCaps, billableAiAllowed, aiTurnCap,
+  WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, SEARCH_DAILY_CEILING, resolvePlan, planCaps, billableAiAllowed, aiTurnCap,
   refillSlot, windowStartFor, nextResetMs, shouldRefill, capReached,
 } from './usage.js';
 
@@ -1011,22 +1011,45 @@ export async function searchConsume(request, env) {
   const resetAt = new Date(nextResetMs(row.window_start)).toISOString();
   const refuse = () => json(402, { allowed: false, reason: 'cap_reached', kind, plan, cap, used: Math.min(used, cap), remaining: 0, resetAt });
 
-  // Fail CLOSED: clearly at/over cap → refuse, no increment, no dedupe row, no
-  // fall-through to a billable call. Free local (cap 0) refuses every time.
-  if (capReached(cap, used)) return refuse();
-
-  // DEDUPE: the first sub-call of a bundle inserts its (user, vz_sid, kind) row and
-  // takes the slot; later sub-calls of the SAME bundle find the row and are allowed
-  // WITHOUT a second increment. Insert-first also closes the race between two
-  // concurrent first-sub-calls of the same bundle (only one insert wins).
+  // DEDUPE BEFORE THE CAP CHECK (Ehsan 2026-09-17 — a real bug, found by the free weekly-searches tests).
+  // The cap check used to run FIRST, so the moment a bundle's first sub-call took the LAST slot, the second
+  // sub-call of that SAME bundle (Places Text then Nearby) arrived with used === cap and was refused: the last
+  // search of every week was served half. With free at 1 local that is not an edge case — it is EVERY free local
+  // search. A bundle that already holds its slot must be let through whatever the counter now reads; the cap
+  // decides whether a NEW bundle may start, never whether a granted one may finish.
+  //
+  // Insert-first still closes the race between two concurrent first-sub-calls of the same bundle (only one insert
+  // wins). Because the insert now happens before the cap test, a refusal has to undo its own row — the same
+  // compensation the lost-the-last-slot path below already does.
+  let inserted = false;
   if (searchId) {
     const ins = await env.DB.prepare(
       'INSERT OR IGNORE INTO consumed_searches (user_id, search_id, kind, window_start, photos_used, created_at) VALUES (?, ?, ?, ?, 0, ?)',
     ).bind(claims.sub, searchId, kind, row.window_start, nowIso()).run();
     if (!(ins?.meta?.changes)) {
-      // Already consumed by this bundle this window → idempotent allow.
+      // Already consumed by this bundle this window → idempotent allow, cap or no cap.
       return ok({ allowed: true, kind, plan, cap, used, remaining: Math.max(0, cap - used), resetAt, idempotent: true });
     }
+    inserted = true;
+  }
+  const undoRow = async () => {
+    if (inserted) await env.DB.prepare('DELETE FROM consumed_searches WHERE user_id = ? AND search_id = ? AND kind = ? AND window_start = ?').bind(claims.sub, searchId, kind, row.window_start).run();
+  };
+
+  // Fail CLOSED: a NEW bundle at or over the cap → refuse, no increment, no row left behind, no fall-through to
+  // a billable call.
+  if (capReached(cap, used)) { await undoRow(); return refuse(); }
+
+  // GLOBAL DAILY CEILING (Ehsan 2026-09-17) — the blast brake that ships with the non-zero free tier. Checked
+  // HERE, after the dedupe insert, so it counts SEARCHES and not the sub-calls of one bundle: an idempotent
+  // re-consume returned above without reaching it. On refusal the dedupe row we just inserted is undone, exactly
+  // like the lost-race path below, so a retry after the window is not read as already-consumed.
+  // It is deliberately NOT the user's cap: the refusal says the service is busy, never "your searches are gone".
+  const ceiling = SEARCH_DAILY_CEILING[kind];
+  const g = await rateLimit(env, `search:${kind}:global`, ceiling, 24 * 60 * 60 * 1000);
+  if (!g.allowed) {
+    await undoRow();
+    return fail(429, 'Search is busy right now. Please try again shortly.', 'search_ceiling_global');
   }
 
   const col = kind === 'local' ? 'local_used' : 'online_used';   // fixed identifiers, never user input
@@ -1036,7 +1059,7 @@ export async function searchConsume(request, env) {
   if (!(res?.meta?.changes)) {
     // Lost the last slot to a concurrent bundle — undo the dedupe row we inserted so
     // a legitimate retry after refill isn't wrongly treated as already-consumed.
-    if (searchId) await env.DB.prepare('DELETE FROM consumed_searches WHERE user_id = ? AND search_id = ? AND kind = ? AND window_start = ?').bind(claims.sub, searchId, kind, row.window_start).run();
+    await undoRow();
     return refuse();
   }
   return ok({ allowed: true, kind, plan, cap, used: used + 1, remaining: cap - (used + 1), resetAt });

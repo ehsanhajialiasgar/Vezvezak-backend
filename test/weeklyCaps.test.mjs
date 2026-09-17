@@ -23,7 +23,7 @@ await t('capReached refuses at/over the cap', () => {
   assert.equal(capReached(18, 18), true);   // exactly at cap → refuse
   assert.equal(capReached(18, 19), true);
   assert.equal(capReached(18, 17), false);
-  assert.equal(capReached(0, 0), true);      // free local (cap 0) always refused
+  assert.equal(capReached(0, 0), true);      // a cap of 0 always refuses (no tier has one now; the guard stays)
 });
 await t('searchConsume returns 402 cap_reached and never falls through when over cap', () => {
   const s = SRC('index.js');
@@ -43,7 +43,7 @@ await t('weekly_search_usage stores COUNTS only — no money column', () => {
   const block = SCHEMA.match(/CREATE TABLE IF NOT EXISTS weekly_search_usage[\s\S]*?\);/);
   assert.ok(block, 'weekly_search_usage table must exist');
   const cols = block[0];
-  for (const money of [/usd/i, /dollar/i, /\bcents?\b/i, /balance/i, /\bcredit/i, /allowance/i, /wallet/i, /\bREAL\b/]) {
+  for (const money of [/usd/i, /dollar/i, /\bcents?\b/i, /balance/i, /\bcredit/i, /weekly searches/i, /wallet/i, /\bREAL\b/]) {
     assert.ok(!money.test(cols), `weekly_search_usage must have no money column (${money})`);
   }
   for (const c of ['local_used', 'online_used', 'window_start', 'refill_dow', 'refill_minute']) {
@@ -55,7 +55,7 @@ await t('no per-user dollar balance is minted into the JWT', () => {
   const s = SRC('index.js');
   const payloads = [...s.matchAll(/signJwt\(\s*(\{[^}]*\})/g)].map(m => m[1]);
   assert.ok(payloads.length > 0, 'expected signJwt call sites');
-  for (const p of payloads) for (const money of [/usd/i, /balance/i, /credit/i, /allowance/i, /dollars?/i]) {
+  for (const p of payloads) for (const money of [/usd/i, /balance/i, /credit/i, /weekly searches/i, /dollars?/i]) {
     assert.ok(!money.test(p), `JWT payload must not carry a money field: ${p}`);
   }
 });
@@ -92,12 +92,18 @@ await t('a slot is stable for a given account', () => {
   assert.deepEqual(refillSlot('usr_stable'), refillSlot('usr_stable'));
 });
 
-console.log('\n(d) NO free-tier path reaches Google Places or a billable AI call');
-await t('free has zero local (Google Places) AND zero online (SerpApi) slots', () => {
-  assert.equal(WEEKLY_CAPS.free.local, 0);
-  assert.equal(planCaps('free').local, 0);
-  assert.equal(WEEKLY_CAPS.free.online, 0, 'free is cache-only — zero live SerpApi slots (2026-08-23)');
-  assert.equal(planCaps('free').online, 0);
+console.log('\n(d) the free weekly count is a COUNTED one, and no free path reaches a billable AI call');
+await t('free has the weekly count the product promises: 1 local + 5 online per week', () => {
+  // Was 0/0 until 2026-09-17 ("free = zero billable calls"). The cold-install trace showed a free user could
+  // never see a single result, so the founder set a real weekly count of searches: 1 local + 5 online, sized on cost (one
+  // local = 5.3 online). This assertion is the number the copy, the client mirror and the budget gate all read.
+  assert.equal(WEEKLY_CAPS.free.local, 1);
+  assert.equal(planCaps('free').local, 1);
+  assert.equal(WEEKLY_CAPS.free.online, 5, 'free gets five live online searches a week (Ehsan 2026-09-17)');
+  assert.equal(planCaps('free').online, 5);
+  // The weekly count is a CEILING, not a licence: at the cap the server still refuses.
+  assert.equal(capReached(WEEKLY_CAPS.free.local, 1), true, 'free local must refuse the second search of the week');
+  assert.equal(capReached(WEEKLY_CAPS.free.online, 5), true, 'free online must refuse the sixth search of the week');
 });
 await t('billable AI is allowed for paid tiers ONLY', () => {
   assert.equal(billableAiAllowed('free'), false);
