@@ -64,16 +64,20 @@ async function signup(request, env) {
   const body = await readJson(request);
   if (!body) return fail(400, 'Invalid request.');
 
+  // A REASON, NOT ONLY A SENTENCE (Ehsan 2026-09-18, first-run item 17). These strings were rendered RAW by
+  // the app, so the one line that matters — why the account could not be created — arrived in English on a
+  // fully Persian screen. The English text stays (it is a useful fallback and a log line); the reason is what
+  // the client translates. Same 1.13 shape the OTP ceilings already use.
   const identifier = normalizeIdentifier(body.identifier);
-  if (!identifier) return fail(400, 'Enter a valid email address or phone number.');
+  if (!identifier) return fail(400, 'Enter a valid email address or phone number.', 'identifier_invalid');
   const password = String(body.password || '');
-  if (password.length < 6) return fail(400, 'Password must be at least 6 characters.');
+  if (password.length < 6) return fail(400, 'Password must be at least 6 characters.', 'password_short');
 
   const rl = await rateLimit(env, `signup:${await ipHash(request, env)}`, 10, 60 * 60 * 1000);
-  if (!rl.allowed) return fail(429, 'Too many attempts. Please try again later.');
+  if (!rl.allowed) return fail(429, 'Too many attempts. Please try again later.', 'rate_limited');
 
   const existing = await env.DB.prepare('SELECT id FROM users WHERE identifier = ?').bind(identifier).first();
-  if (existing) return fail(409, 'An account with this email or phone already exists.');
+  if (existing) return fail(409, 'An account with this email or phone already exists.', 'identifier_taken');
 
   const { hash, salt, iter } = await hashPassword(password);
   const user = {
