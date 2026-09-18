@@ -25,12 +25,27 @@ function bodyOf(name) {
   return IDX.slice(start, end);
 }
 
-for (const [fn, closed] of [['moderateReview', /note: 'awaiting_moderation'/], ['moderateCatalogItem', /return 'pending'/]]) {
-  t(`${fn} gates on MODERATION_ENABLED !== "1" and FAILS CLOSED`, () => {
+// WHAT "FAILS CLOSED" MEANS HERE, restated 2026-09-18. The flag guards ONE thing: whether text is sent to a
+// model. It was ALSO holding the catalogue shut — with the flag off every item returned 'pending', and since
+// nothing else in the backend ever wrote 'live', a merchant's products were invisible to every buyer for ever.
+// That was not a moderation decision, it was an accident of who owned the default. A listing now goes live
+// labelled "listed by the merchant · unverified" and the deterministic screen is what can refuse it; the flag
+// keeps its real job, which is that nothing reaches env.AI while it is off (asserted below, unchanged).
+// A REVIEW is different and keeps its old default: an unmoderated review is marked awaiting_moderation rather
+// than shown as checked, because there the claim is about OUR check, not about the merchant's own listing.
+for (const [fn, closed] of [['moderateReview', /note: 'awaiting_moderation'/], ['moderateCatalogItem', /return 'live'/]]) {
+  t(`${fn} gates on MODERATION_ENABLED !== "1" and never lets the flag approve`, () => {
     const body = bodyOf(fn);
     const m = body.match(/if \(env\.MODERATION_ENABLED !== '1'\) (return [^\n;]+);/);
     assert.ok(m, `${fn} must gate on env.MODERATION_ENABLED !== '1'`);
-    assert.match(m[1], closed, `${fn}'s flag gate must return the unmoderated/fail-closed value, never an approval`);
+    assert.match(m[1], closed, `${fn}'s flag-off value must be the one this product decided, not a model's approval`);
+  });
+
+  t(`${fn}: the deterministic screen is ABOVE the flag — it runs whatever the flag says`, () => {
+    const body = bodyOf(fn);
+    const screen = body.search(/screenCatalogText|screenReviewText|PROHIBITED/);
+    const flag = body.indexOf('MODERATION_ENABLED');
+    if (screen >= 0) assert.ok(screen < flag, `${fn}'s prohibited screen must precede the flag gate`);
   });
 
   t(`${fn}: the FLAG runs before anything can reach the model`, () => {

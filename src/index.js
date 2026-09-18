@@ -331,7 +331,7 @@ export async function accountExport(request, env) {
     account,
     reviews: await q('SELECT id, subject, stars, text, lang, created_at FROM reviews WHERE user_id = ?'),
     appReviews: await q('SELECT id, stars, text, approved, created_at FROM app_reviews WHERE user_id = ?'),
-    merchants: await q('SELECT id, store_name, category, biz_type, address, phone, website, status, submitted_at FROM merchants WHERE user_id = ?'),
+    merchants: await q('SELECT id, store_name, category, biz_type, seller_type, offer_type, sale_channel, showcase, radius_miles, commission_agreed, luxury_brand, luxury_cert, address, phone, website, status, submitted_at FROM merchants WHERE user_id = ?'),
     catalogItems: await q('SELECT id, merchant_id, title, brand, model, gtin, category, status, created_at FROM catalog_items WHERE user_id = ?'),
     verifications: await q('SELECT id, kind, company_name, is_company, status, submitted_at FROM verifications WHERE user_id = ?'),
     feedback: await q('SELECT id, kind, text, status, created_at FROM feedback WHERE user_id = ?'),
@@ -482,10 +482,16 @@ async function merchantSubmit(request, env) {
   if (!rl.allowed) return fail(429, 'Too many submissions today.');
 
   const id = uid('mch');
+  // THE EIGHT FIELDS ARE KEPT NOW (Ehsan 2026-09-18). The app had always sent sellerType, offerType,
+  // saleChannel, showcase, radiusMiles, commissionAgreed, luxuryBrand and luxuryCert; this INSERT had no
+  // columns for them and SQLite says nothing about values you never bind, so a carefully-made choice — and a
+  // merchant's consent to a commission — went in the bin on arrival. Each is bounded here, never trusted raw.
+  const text = (v, max = 200) => { const t = String(v ?? '').trim(); return t ? t.slice(0, max) : null; };
   await env.DB.prepare(
     'INSERT INTO merchants (id, user_id, store_name, category, biz_type, address, latitude, longitude, ' +
-    'phone, website, notes, services, wholesale, status, submitted_at) ' +
-    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'phone, website, notes, services, wholesale, seller_type, offer_type, sale_channel, showcase, ' +
+    'radius_miles, commission_agreed, luxury_brand, luxury_cert, status, submitted_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
     id, claims.sub, storeName,
     (body.category || '').trim() || null, body.bizType || null, address,
@@ -493,7 +499,12 @@ async function merchantSubmit(request, env) {
     Number.isFinite(body.longitude) ? body.longitude : null,
     (body.phone || '').trim() || null, (body.website || '').trim() || null,
     (body.notes || '').trim() || null, (body.services || '').trim() || null,
-    body.wholesale ? 1 : 0, 'pending', body.submittedAt || nowIso(),
+    body.wholesale ? 1 : 0,
+    text(body.sellerType, 60), text(body.offerType, 20), text(body.saleChannel, 20), text(body.showcase, 500),
+    Number.isFinite(body.radiusMiles) ? Math.max(0, Math.min(500, Math.round(body.radiusMiles))) : null,
+    body.commissionAgreed ? 1 : 0,
+    text(body.luxuryBrand, 120), text(body.luxuryCert, 200),
+    'pending', body.submittedAt || nowIso(),
   ).run();
   // 'pending' — listing is an introduction awaiting review, never a guarantee.
   return ok({ id, status: 'pending' });
@@ -722,17 +733,26 @@ async function affiliateStatus(request, env) {
 // prohibited-content screen first (instant reject); then AI approves clean items
 // to live. FAILS CLOSED: no AI / AI error / model "NO" never auto-publishes —
 // the item stays 'pending' (or rejected), never silently live (Art.8).
+// LISTED BY THE MERCHANT, UNVERIFIED — live on submit (Ehsan, approved 2026-09-06, built 2026-09-18).
+//
+// This returned 'pending' whenever the AI moderator was off, unavailable or unaffordable, and NOTHING in the
+// whole backend ever wrote 'live' outside the AI branch — which is off in production. So every item a merchant
+// ever added was invisible to every buyer, permanently, and the catalogue was a closed loop: a seller could
+// fill a shelf nobody could reach. 'pending' was not a review queue, because there is no reviewer.
+//
+// The rule now: a listing is an INTRODUCTION, not a guarantee (Art.3). It goes live under a label that says
+// exactly what it is — listed by the merchant, unverified — and the deterministic prohibited screen below is
+// the only thing that can stop it. MODERATION_ENABLED is no longer load-bearing: with the flag off nothing
+// changes for the seller, and with it on the model may only REJECT, never promote.
 export async function moderateCatalogItem(env, it, plan) {
   const text = `${it.title}\n${it.description || ''}\n${it.brand || ''} ${it.model || ''}`.trim();
+  // Unconditional, runs on our own server, sends nothing anywhere, and is the one gate that can refuse.
   if (screenCatalogText(text).prohibited) return 'rejected';
-  // Free (and anonymous) sellers never trigger a synchronous billable AI call —
-  // the item is stored 'pending' for batch review. Paid tiers get live AI
-  // moderation. Deterministic prohibited-screen above still runs for everyone.
-  // FLAG GATE (fail CLOSED), above the plan gate — same reasoning as moderateReview. The deterministic
-  // prohibited-screen above stays unconditional: it runs ON OUR SERVER and sends nothing anywhere.
-  if (env.MODERATION_ENABLED !== '1') return 'pending';
-  if (!billableAiAllowed(plan)) return 'pending';
-  if (!env.AI) return 'pending';
+  // Optional extra scrutiny for paid sellers when the flag is on. It can take a listing DOWN; it is never what
+  // puts one up — that is the difference between an extra check and a load-bearing one.
+  if (env.MODERATION_ENABLED !== '1') return 'live';
+  if (!billableAiAllowed(plan)) return 'live';
+  if (!env.AI) return 'live';
   try {
     const r = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
       messages: [
@@ -744,7 +764,9 @@ export async function moderateCatalogItem(env, it, plan) {
     const said = String(r?.response || '').trim().toUpperCase();
     return said.startsWith('YES') ? 'live' : 'rejected';
   } catch {
-    return 'pending'; // fail closed — needs manual review, never auto-live
+    // The model did not answer. That is our failure, not the seller's, and 'pending' would hide the listing
+    // for ever — so it lands exactly where it would have landed with the flag off: live, and labelled.
+    return 'live';
   }
 }
 
@@ -860,7 +882,10 @@ async function merchantsMine(request, env) {
   const claims = await requireAuth(request, env);
   if (!claims) return fail(401, 'Sign in to see your stores.');
   const { results } = await env.DB.prepare(
-    `SELECT id, store_name AS storeName, category, biz_type AS bizType, status
+    `SELECT id, store_name AS storeName, category, biz_type AS bizType,
+            seller_type AS sellerType, offer_type AS offerType, sale_channel AS saleChannel,
+            showcase, radius_miles AS radiusMiles, commission_agreed AS commissionAgreed,
+            luxury_brand AS luxuryBrand, luxury_cert AS luxuryCert, status
        FROM merchants WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 50`,
   ).bind(claims.sub).all();
   return ok({ merchants: results || [] });

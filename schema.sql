@@ -86,6 +86,18 @@ CREATE TABLE IF NOT EXISTS merchants (
   notes        TEXT,
   services     TEXT,
   wholesale    INTEGER NOT NULL DEFAULT 0,
+  -- EIGHT FIELDS THE APP HAD ALWAYS SENT AND THE SCHEMA HAD NEVER HELD (Ehsan 2026-09-18). The submit screen
+  -- collects all of these and postSubmission puts them on the wire; until today the INSERT had no columns for
+  -- them, so they were dropped on arrival without a word. commission_agreed is the one that mattered most: a
+  -- merchant consented to pay a commission and nothing recorded that they had.
+  seller_type       TEXT,     -- the 13-option SELLER_TYPES choice (richer than biz_type)
+  offer_type        TEXT,     -- products | services | both
+  sale_channel      TEXT,     -- physical | online | both
+  showcase          TEXT,     -- link to portfolio / tutorials, service sellers
+  radius_miles      INTEGER,  -- service radius the business covers
+  commission_agreed INTEGER NOT NULL DEFAULT 0,  -- the merchant's own consent, recorded
+  luxury_brand      TEXT,
+  luxury_cert       TEXT,
   status       TEXT NOT NULL DEFAULT 'pending',  -- pending | live | rejected
   submitted_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL

@@ -143,10 +143,18 @@ await t('flag ON + FREE plan: still not moderated — the plan gate survives und
   assert.equal(v.byModel, false);
   assert.equal(v.note, 'awaiting_moderation');
 });
-await t('moderateCatalogItem never touches env.AI on a free plan', async () => {
+await t('moderateCatalogItem never touches env.AI on a free plan (and the item is still reachable)', async () => {
+  // The money invariant is unchanged and is what this trap proves: a free seller never triggers a billable AI
+  // call. What changed on 2026-09-18 is where the unmoderated item LANDS — 'live' and labelled, instead of a
+  // 'pending' that nothing in the backend could ever move, which hid every free seller's shelf from every buyer.
   const trap = { AI: { run: () => { throw new Error('env.AI CALLED for a free user'); } } };
   const status = await moderateCatalogItem(trap, { title: 'Blue Widget', description: 'a nice blue widget', brand: 'Acme', model: 'X1' }, 'free');
-  assert.equal(status, 'pending');
+  assert.equal(status, 'live');
+});
+await t('a prohibited listing is still rejected on a free plan, without the model', async () => {
+  const trap = { AI: { run: () => { throw new Error('env.AI CALLED for a free user'); } } };
+  const status = await moderateCatalogItem(trap, { title: 'Replica watch, Swiss movement', description: '', brand: '', model: '' }, 'free');
+  assert.equal(status, 'rejected', 'going live on submit must not weaken the deterministic screen');
 });
 // /extract was DELETED 2026-09-11 (7.5, dead-code gate): a spend-capable handler that HAD a caller
 // (the route dispatch) and that NO USER PATH REACHED — zero client references in the whole app.
