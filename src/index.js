@@ -506,7 +506,10 @@ async function merchantSubmit(request, env) {
     body.wholesale ? 1 : 0,
     text(body.sellerType, 60), text(body.offerType, 20), text(body.saleChannel, 20), text(body.showcase, 500),
     Number.isFinite(body.radiusMiles) ? Math.max(0, Math.min(500, Math.round(body.radiusMiles))) : null,
-    body.commissionAgreed ? 1 : 0,
+    // A MISSING ANSWER IS NOT A NO (Ehsan 2026-09-18). `body.commissionAgreed ? 1 : 0` wrote 0 whenever the
+    // field was absent — and the wizard stopped asking on 2026-08-17, so EVERY new row said "declined" about a
+    // question nobody was put. Only an explicit true or false is recorded; anything else is NULL, never asked.
+    body.commissionAgreed === true ? 1 : body.commissionAgreed === false ? 0 : null,
     text(body.luxuryBrand, 120), text(body.luxuryCert, 200),
     'pending', body.submittedAt || nowIso(),
   ).run();

@@ -87,6 +87,21 @@ await t('the commission the merchant agreed to is RECORDED — the worst of the 
   assert.equal(row2.commission_agreed, 0, 'and a merchant who did NOT agree must not be recorded as having agreed');
 });
 
+await t('a question nobody was asked is NULL, not a no', async () => {
+  // The consent checkbox was removed from the wizard on 2026-08-17, so the app sends nothing for this field.
+  // `body.commissionAgreed ? 1 : 0` turned that silence into "declined" on every new row. Three states now.
+  const { commissionAgreed, ...noAnswer } = SENT;
+  const r = await call('/merchants/submit', { ...noAnswer, storeName: 'Never Asked Shop' });
+  const row = db.prepare('SELECT commission_agreed FROM merchants WHERE id = ?').get(r.body.id);
+  assert.equal(row.commission_agreed, null, 'an absent answer must be stored as NULL — never asked is not declined');
+  const req = new Request('https://api.test/merchants/mine', { headers: { Authorization: `Bearer ${token}` } });
+  const mine = (await (await worker.fetch(req, env)).json()).merchants.find(m => m.id === r.body.id);
+  assert.equal(mine.commissionAgreed, null, 'and it must still read null through /merchants/mine, not false or 0');
+  const exp = await call('/account/export', {});
+  const exported = exp.body.export.merchants.find(m => m.id === r.body.id);
+  assert.equal(exported.commission_agreed, null, 'and null in the data export the person can read');
+});
+
 await t('the merchant can read back what they told us (/merchants/mine)', async () => {
   const req = new Request('https://api.test/merchants/mine', { headers: { Authorization: `Bearer ${token}` } });
   const res = await worker.fetch(req, env);
@@ -105,7 +120,7 @@ await t('hostile input is bounded, not trusted', async () => {
   const row = db.prepare('SELECT seller_type, radius_miles, commission_agreed FROM merchants WHERE id = ?').get(r.body.id);
   assert.equal(row.seller_type.length, 60, 'a long seller type is truncated, never stored whole');
   assert.equal(row.radius_miles, 500, 'the radius is clamped');
-  assert.equal(row.commission_agreed, 1, 'a truthy value is recorded as consent (1), never as the raw string');
+  assert.equal(row.commission_agreed, null, 'a string is not an answer: only an explicit true or false is recorded');
 });
 
 // ── 2 · the listing is reachable ──────────────────────────────────────────────

@@ -95,7 +95,12 @@ CREATE TABLE IF NOT EXISTS merchants (
   sale_channel      TEXT,     -- physical | online | both
   showcase          TEXT,     -- link to portfolio / tutorials, service sellers
   radius_miles      INTEGER,  -- service radius the business covers
-  commission_agreed INTEGER NOT NULL DEFAULT 0,  -- the merchant's own consent, recorded
+  -- THREE STATES, NOT TWO (Ehsan 2026-09-18). This was INTEGER NOT NULL DEFAULT 0, so every row that existed
+  -- before the column was added read 0 — "declined" and "never asked" were the same value, and the 0 was a
+  -- default wearing the clothes of an answer. It is nullable now: 1 agreed · 0 declined · NULL never asked.
+  -- The wizard does not ask today (the consent checkbox was removed 2026-08-17), so NULL is the honest value
+  -- for every new submission too, and merchantSubmit writes NULL when the field is absent rather than 0.
+  commission_agreed INTEGER,
   luxury_brand      TEXT,
   luxury_cert       TEXT,
   status       TEXT NOT NULL DEFAULT 'pending',  -- pending | live | rejected
