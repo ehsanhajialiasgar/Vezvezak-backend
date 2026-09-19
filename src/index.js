@@ -39,6 +39,7 @@ import { merchantMatches } from './verified.js';
 import {
   WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, SEARCH_DAILY_CEILING, resolvePlan, planCaps, billableAiAllowed, aiTurnCap,
   refillSlot, windowStartFor, nextResetMs, shouldRefill, capReached,
+  SEARCH_SUBCALLS_PER_SLOT, SEARCH_BUNDLE_TTL_MS, LOOKUP_PER_SLOT, LOOKUP_DAILY_PER_USER, LOOKUP_DAILY_CEILING,
 } from './usage.js';
 
 const OTP_TTL_MS = 10 * 60 * 1000;      // 10 minutes
@@ -1032,9 +1033,14 @@ export async function searchConsume(request, env) {
   // A Photo is a sub-call of an already-consumed local search — bounded, not a slot.
   if (kind === 'photo') return photoConsume(env, claims.sub, searchId);
 
+  // A LOOKUP is geocode or place/details — billable, not a slot, and until today not capped at all and not really
+  // authenticated (the proxy only checked that an Authorization header existed). Reaching this line means the JWT
+  // verified, which is the authentication half; lookupConsume is the cap half.
+  if (kind === 'lookup') return lookupConsume(env, claims.sub, searchId);
+
   // Only 'local' | 'online' are metered as slots. Accessibility (voice.*) is never
   // sent here and would be rejected as non-billable — never counted on any tier.
-  if (!METERED_KINDS.has(kind)) return fail(400, 'kind must be "local", "online" or "photo".');
+  if (!METERED_KINDS.has(kind)) return fail(400, 'kind must be "local", "online", "photo" or "lookup".');
 
   const plan = await planFor(env, claims.sub);
   const cap = planCaps(plan)[kind];
@@ -1059,7 +1065,35 @@ export async function searchConsume(request, env) {
       'INSERT OR IGNORE INTO consumed_searches (user_id, search_id, kind, window_start, photos_used, created_at) VALUES (?, ?, ?, ?, 0, ?)',
     ).bind(claims.sub, searchId, kind, row.window_start, nowIso()).run();
     if (!(ins?.meta?.changes)) {
-      // Already consumed by this bundle this window → idempotent allow, cap or no cap.
+      // ALREADY CONSUMED BY THIS BUNDLE → idempotent allow, cap or no cap. That is correct and stays: the cap
+      // decides whether a NEW bundle may start, never whether a granted one may finish.
+      //
+      // BUT IT IS NOW BOUNDED (Ehsan 2026-09-19). Until today this line returned allowed:true for the rest of the
+      // week to anyone holding one vz_sid constant, and the global ceiling below was never reached on this path —
+      // the free weekly cap was bypassable by any client, and the client builds the id unsigned. Two bounds, both
+      // required, because either alone leaks (see SEARCH_SUBCALLS_PER_SLOT in usage.js):
+      //   · FRESHNESS — created_at is finally read. A bundle older than the TTL is closed for good; a replayer
+      //     cannot come back to it tomorrow, and a new id costs a slot.
+      //   · COUNT — at most SEARCH_SUBCALLS_PER_SLOT further calls ride this slot, counted atomically.
+      // A refusal here does NOT undo the row: the slot was legitimately consumed by the first sub-call and the
+      // user keeps it. What is refused is one more call on top of a bundle that has had its share.
+      const prior = await env.DB.prepare(
+        'SELECT created_at FROM consumed_searches WHERE user_id = ? AND search_id = ? AND kind = ? AND window_start = ?',
+      ).bind(claims.sub, searchId, kind, row.window_start).first();
+      const openedAt = prior?.created_at ? Date.parse(prior.created_at) : NaN;
+      // Unreadable or missing timestamp → treat the bundle as closed. Fail closed: an unverifiable age is not
+      // evidence of freshness, and the caller can start a new search, which costs a slot and is the honest price.
+      if (!Number.isFinite(openedAt) || Date.now() - openedAt > SEARCH_BUNDLE_TTL_MS) {
+        return fail(409, 'That search has finished. Start a new search.', 'search_bundle_closed');
+      }
+      // The separator is '|' and not ':' ON PURPOSE. storedBucket hashes only what follows the LAST colon, so
+      // `sid:<user>:<searchId>:<kind>` would have written the account id and the raw search id into rate_limits
+      // in plaintext — the exact defect the 2026-09-15 key audit removed from login:/otp:, reintroduced by a
+      // convenient-looking key. One colon, everything identifying after it, hashed as a single subject.
+      const ride = await rateLimit(env, `sid:${claims.sub}|${searchId}|${kind}`, SEARCH_SUBCALLS_PER_SLOT, SEARCH_BUNDLE_TTL_MS);
+      if (!ride.allowed) {
+        return fail(429, 'That search has finished. Start a new search.', 'search_subcalls_exhausted');
+      }
       return ok({ allowed: true, kind, plan, cap, used, remaining: Math.max(0, cap - used), resetAt, idempotent: true });
     }
     inserted = true;
@@ -1095,6 +1129,25 @@ export async function searchConsume(request, env) {
     return refuse();
   }
   return ok({ allowed: true, kind, plan, cap, used: used + 1, remaining: cap - (used + 1), resetAt });
+}
+
+// BILLABLE FOLLOW-UPS (geocode, place/details). No slot is consumed — these ride alongside a search rather than
+// being one — but they are real money, so they are bounded three ways and every one of them is attributable to a
+// verified account. The bounds are separate on purpose: the per-bundle bound stops one result list from costing
+// dozens of calls, the per-account bound stops a loop across many bundles, and the global one is the blast brake
+// for a bug or an abuser with many accounts. rate_limits hashes its bucket, so no raw search id is stored.
+export async function lookupConsume(env, userId, searchId) {
+  const g = await rateLimit(env, 'lookup:global', LOOKUP_DAILY_CEILING, 24 * 60 * 60 * 1000);
+  if (!g.allowed) return fail(429, 'Store details are busy right now. Please try again shortly.', 'lookup_ceiling_global');
+  const perUser = await rateLimit(env, `lookup:u|${userId}`, LOOKUP_DAILY_PER_USER, 24 * 60 * 60 * 1000);
+  if (!perUser.allowed) return fail(429, 'Store details are busy right now. Please try again shortly.', 'lookup_daily_user');
+  // A bundle bound applies only when the caller named a bundle. A geocode with no vz_sid (region detection at
+  // launch) is still covered by the two bounds above — it is not a hole, it is a call that belongs to no search.
+  if (searchId) {
+    const perSlot = await rateLimit(env, `lookup:s|${userId}|${searchId}`, LOOKUP_PER_SLOT, SEARCH_BUNDLE_TTL_MS);
+    if (!perSlot.allowed) return fail(429, 'Store details are busy right now. Please try again shortly.', 'lookup_slot_exhausted');
+  }
+  return ok({ allowed: true, kind: 'lookup', slot: false });
 }
 
 // Sub-call ceiling for Photos. A Photo consumes NO slot, but it must ride under a

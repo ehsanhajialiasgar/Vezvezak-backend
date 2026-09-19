@@ -69,6 +69,51 @@ export const METERED_KINDS = new Set(['local', 'online']);
 // under one slot. 6/search matches the client's list+detail photo budget.
 export const PHOTO_PER_SEARCH = 6;
 
+// ── THE BOUND ON AN ALREADY-CONSUMED BUNDLE (Ehsan 2026-09-19) ───────────────────────────────────────────────
+// vz_sid is built by the CLIENT and is unsigned. Until today, once a bundle's row existed, every later call with
+// that same id returned allowed:true — "cap or no cap" — for the rest of the week, and the global daily ceiling
+// sat below that return, so neither guard was on the path. Holding one vz_sid constant bypassed the weekly cap.
+//
+// That idempotent allow is NOT a mistake and must stay: the cap decides whether a NEW bundle may start, never
+// whether a granted one may finish (removing it is what served the last search of every week half). What was
+// missing is a BOUND on how much one granted bundle may finish.
+//
+// TWO BOUNDS, because either alone leaks. A count alone resets with its rate-limit window, handing a replayer a
+// fresh allowance every window for the rest of the week. A freshness window alone bounds nothing inside it — a
+// client can issue thousands of calls in two minutes. Together they are finite and small: at most
+// SEARCH_SUBCALLS_PER_SLOT extra calls, only while the bundle is younger than SEARCH_BUNDLE_TTL_MS, and a new id
+// costs a slot.
+//
+// WHY THIS SHAPE AND NOT THE OTHER TWO IN THIS FILE. The assistant builds its id server-side, which is stronger —
+// but vz_sid exists precisely so the client can bind sub-calls it makes in parallel, so a server-issued id needs a
+// round-trip before every search, on the critical path, with a new failure mode. The photo path's shape (an atomic
+// bounded bump) is the one copied here — the difference is that it counts in rate_limits rather than a new column,
+// so no migration stands between this hole and its fix. The bucket name is hashed by storedBucket, so no raw
+// search id is stored.
+//
+// SIZING. A legitimate LOCAL bundle makes two metered calls (Places Text + Nearby): one insert, one idempotent
+// hit. Four allows that plus three retries. The client's own billable timeout is 15s, so a five-minute bundle is
+// far longer than any real sub-call can take.
+export const SEARCH_SUBCALLS_PER_SLOT = 4;
+export const SEARCH_BUNDLE_TTL_MS = 5 * 60 * 1000;
+
+// ── BILLABLE FOLLOW-UPS: geocode AND place/details (Ehsan 2026-09-19) ────────────────────────────────────────
+// Both are real Google money and NEITHER had a cap. SLOT_KIND is null for them on the client, so no slot is taken,
+// and the proxy's only guard was "an Authorization header exists" — which `Bearer lol` satisfies, verified against
+// the deployed Worker today (200, with live Google data). The Worker URL ships in the app bundle.
+//
+// place/details is the expensive one: the store card re-requests display fields on view (Google forbids caching
+// them), so a scroll through a result list is dozens of paid calls, and the in-session cache kept only successes —
+// an error re-fired on every render.
+//
+// THE FIX IS ONE MECHANISM FOR BOTH PROBLEMS. The proxy cannot verify a JWT (it holds no JWT_SECRET, deliberately),
+// so instead of inventing a second auth path it now asks the backend — which DOES verify — and the same question
+// carries the cap. A call that cannot be attributed to a real account does not happen, and a call from a real
+// account is bounded three ways: per search bundle, per account per day, and globally per day.
+export const LOOKUP_PER_SLOT = 40;              // a full scroll of a result list, and no more
+export const LOOKUP_DAILY_PER_USER = 300;
+export const LOOKUP_DAILY_CEILING = 20000;      // global blast brake, sized like SEARCH_DAILY_CEILING
+
 // Legacy plan ids fold onto the three live tiers; anything unknown (or absent)
 // resolves to 'free', so the server ALWAYS enforces free limits authoritatively
 // even before an IAP receipt writes a paid plan.
