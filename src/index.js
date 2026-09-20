@@ -74,6 +74,21 @@ async function signup(request, env) {
   const password = String(body.password || '');
   if (password.length < 6) return fail(400, 'Password must be at least 6 characters.', 'password_short');
 
+  // NO PHONE SIGN-UP (Ehsan 2026-09-20 — decided, not deferred).
+  //
+  // A phone account could be CREATED and then never recovered: sendCode refuses anything that is not an email
+  // ("SMS codes are not available yet"), so the one-time code and the password reset are both undeliverable. The
+  // form accepted it silently and the person found out the day they forgot their password. That is a door that
+  // locks behind the user.
+  //
+  // Making it work needs a paid SMS gateway and per-country regulatory handling — an account and a billing
+  // decision, not a code change. Until that exists, the honest answer is to not offer it. Phone SIGN-IN still
+  // works for accounts that already exist: login is identifier + password and needs no delivery.
+  if (channelOf(identifier) !== 'email') {
+    return fail(400, 'Sign up with an email address. We cannot send a phone a verification or reset code yet, and an account we cannot help you back into is worse than none.', 'email_required');
+  }
+
+
   const rl = await rateLimit(env, `signup:${await ipHash(request, env)}`, 10, 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many attempts. Please try again later.', 'rate_limited');
 
@@ -131,6 +146,14 @@ async function otpRequest(request, env) {
   const purpose = String(body.purpose || '');
   if (!identifier) return fail(400, 'Enter a valid email address or phone number.');
   if (!['signup', 'signin', 'reset'].includes(purpose)) return fail(400, 'Invalid purpose.');
+
+  // AND NO CODE IS EVER ISSUED TO A PHONE (Ehsan 2026-09-20). This used to run all three ceilings, generate a
+  // code, INSERT it into otp_codes, and only then ask sendCode — which refuses every phone. So a rotating phone
+  // number wrote an unbounded number of rows for codes that could never be delivered, and the user waited for an
+  // SMS that was never sent. The channel is known from the identifier alone; it is answered first.
+  if (channelOf(identifier) !== 'email') {
+    return fail(400, 'Codes can only be sent to an email address. We cannot send an SMS yet.', 'email_required');
+  }
 
   // THREE ceilings, each broader than the last, ALL fail CLOSED. Per-identifier alone
   // was defeated by rotating the identifier (1.4 trace): a metered Resend email with no
