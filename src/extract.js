@@ -31,7 +31,23 @@
 import { json, fail, rateLimit, readJson, nowIso, sha256, requireAuth, planFor } from './lib.js';
 import { billableAiAllowed } from './usage.js';
 
-const UA = 'VezvezakBot/1.0 (+https://vezvezak.com/bot; respects robots.txt)';
+// THE USER-AGENT IS GONE, BECAUSE THE CRAWLER IS (Ehsan 2026-09-20).
+//
+// This constant read `VezvezakBot/1.0 (+https://vezvezak.com/bot; respects robots.txt)` and was never used:
+// /extract was deleted on 2026-09-11 (see the note at the foot of this file), there is no fetch() left in here,
+// and nothing anywhere in the Worker or the proxy sets a User-Agent. It had never been sent to anyone.
+//
+// It came up because a new gate asked whether every vezvezak.com URL we hold is a page the site serves, and
+// /bot answers 404. The first instinct was to publish a /bot page — until the code was read: a page describing
+// a self-identifying crawler that obeys robots.txt would have been a claim about software that does not run.
+// Two of its three promises could not be checked at all, because there is no fetcher to check.
+//
+// So the claim was taken out rather than made true, which is the same rule the app's capability gates apply:
+// a string kept for later is a claim that ships. When the merchant extract bridge is built it will declare its
+// own User-Agent, and site-gate fails the deploy if that contact URL is not a published page.
+//
+// WHAT STAYED: isAllowedByRobots and blockedReason below. They are tested, they are the substance of ledger 3.1
+// Part 3, and deleting a working guard because its caller went is the opposite error.
 const MAX_BYTES = 600_000;          // never ingest more than a page's worth
 const FETCH_TIMEOUT_MS = 12_000;
 const CONFIDENCE_THRESHOLD = 0.6;   // below this we say "unsure", never a number
