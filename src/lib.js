@@ -133,6 +133,31 @@ export function normalizeIdentifier(raw) {
 }
 export const channelOf = id => (id.includes('@') ? 'email' : 'phone');
 
+// EMAIL IS THE ONLY WAY IN, AT EVERY DOOR (Ehsan 2026-09-21).
+//
+// We send no SMS. There is no gateway, no per-country regulatory handling, and sendCode refuses anything that is
+// not an email. An identifier we cannot deliver to is an account with no recovery path: the person signs in fine
+// for months and is locked out permanently the first time they forget the password. The app has not launched, so
+// there are no phone accounts to preserve, and there is no reason to offer a door we cannot open.
+//
+// This is ONE function called by every auth route rather than a check repeated in five places, because the last
+// time a correct guard was written it was put on some of the paths and not the others. It returns the REASON so
+// the caller can tell a malformed identifier ("that is not an address") apart from a well-formed phone number
+// ("we cannot send you anything") — the person typing a phone number needs to be told which it is.
+//
+// WHEN SMS EXISTS, this function is the one place that changes.
+export function emailOnly(identifier) {
+  if (!identifier) return { ok: false, reason: 'identifier_invalid', message: 'Enter a valid email address.' };
+  if (channelOf(identifier) !== 'email') {
+    return {
+      ok: false,
+      reason: 'email_required',
+      message: 'Sign in with an email address. We cannot send a phone a verification or reset code yet, and an account we cannot help you back into is worse than none.',
+    };
+  }
+  return { ok: true };
+}
+
 // ── rate limiting (fixed window, D1-backed) ─────────────────────────────────
 // RATE-LIMIT KEYS HOLD NO IDENTIFIER, AND EXPIRED COUNTERS ARE REMOVED (Ehsan 2026-09-15).
 // The bucket name used to be stored as written — `login:<email>`, `otp:<phone>` — in plain text, and a row was only

@@ -27,9 +27,7 @@
  *   GET  /health                                                 -> {ok, ...}
  */
 
-import {
-  CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword,
-  signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject } from './lib.js';
+import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly } from './lib.js';
 import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
@@ -70,7 +68,7 @@ async function signup(request, env) {
   // fully Persian screen. The English text stays (it is a useful fallback and a log line); the reason is what
   // the client translates. Same 1.13 shape the OTP ceilings already use.
   const identifier = normalizeIdentifier(body.identifier);
-  if (!identifier) return fail(400, 'Enter a valid email address or phone number.', 'identifier_invalid');
+  if (!identifier) return fail(400, 'Enter a valid email address.', 'identifier_invalid');
   const password = String(body.password || '');
   if (password.length < 6) return fail(400, 'Password must be at least 6 characters.', 'password_short');
 
@@ -84,16 +82,15 @@ async function signup(request, env) {
   // Making it work needs a paid SMS gateway and per-country regulatory handling — an account and a billing
   // decision, not a code change. Until that exists, the honest answer is to not offer it. Phone SIGN-IN still
   // works for accounts that already exist: login is identifier + password and needs no delivery.
-  if (channelOf(identifier) !== 'email') {
-    return fail(400, 'Sign up with an email address. We cannot send a phone a verification or reset code yet, and an account we cannot help you back into is worse than none.', 'email_required');
-  }
+  const su = emailOnly(identifier);
+  if (!su.ok) return fail(400, su.message, su.reason);
 
 
   const rl = await rateLimit(env, `signup:${await ipHash(request, env)}`, 10, 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many attempts. Please try again later.', 'rate_limited');
 
   const existing = await env.DB.prepare('SELECT id FROM users WHERE identifier = ?').bind(identifier).first();
-  if (existing) return fail(409, 'An account with this email or phone already exists.', 'identifier_taken');
+  if (existing) return fail(409, 'An account with this email address already exists.', 'identifier_taken');
 
   const { hash, salt, iter } = await hashPassword(password);
   const user = {
@@ -119,7 +116,11 @@ async function login(request, env) {
   const body = await readJson(request);
   if (!body) return fail(400, 'Invalid request.');
   const identifier = normalizeIdentifier(body.identifier);
-  if (!identifier) return fail(400, 'Enter a valid email address or phone number.');
+  // THE DOOR THAT WAS STILL OPEN (2026-09-21). Sign-up and the code request refused a phone; LOGIN did not, so a
+  // phone account created before that refusal — or by any other means — could still be signed in with, into an
+  // account with no recovery path. Every auth route now asks the same question.
+  const li = emailOnly(identifier);
+  if (!li.ok) return fail(400, li.message, li.reason);
 
   // Throttle per identifier AND per IP — credential stuffing hits both.
   for (const bucket of [`login:${identifier}`, `loginip:${await ipHash(request, env)}`]) {
@@ -130,7 +131,7 @@ async function login(request, env) {
   const user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ?').bind(identifier).first();
   // Same message whether the account is missing or the password is wrong, so we
   // don't confirm which emails/phones are registered.
-  const GENERIC = 'Incorrect email/phone or password.';
+  const GENERIC = 'Incorrect email address or password.';
   if (!user) return fail(401, GENERIC);
   if (!(await verifyPassword(String(body.password || ''), user))) return fail(401, GENERIC);
 
@@ -144,16 +145,15 @@ async function otpRequest(request, env) {
   if (!body) return fail(400, 'Invalid request.');
   const identifier = normalizeIdentifier(body.identifier);
   const purpose = String(body.purpose || '');
-  if (!identifier) return fail(400, 'Enter a valid email address or phone number.');
+  if (!identifier) return fail(400, 'Enter a valid email address.');
   if (!['signup', 'signin', 'reset'].includes(purpose)) return fail(400, 'Invalid purpose.');
 
   // AND NO CODE IS EVER ISSUED TO A PHONE (Ehsan 2026-09-20). This used to run all three ceilings, generate a
   // code, INSERT it into otp_codes, and only then ask sendCode — which refuses every phone. So a rotating phone
   // number wrote an unbounded number of rows for codes that could never be delivered, and the user waited for an
   // SMS that was never sent. The channel is known from the identifier alone; it is answered first.
-  if (channelOf(identifier) !== 'email') {
-    return fail(400, 'Codes can only be sent to an email address. We cannot send an SMS yet.', 'email_required');
-  }
+  const oq = emailOnly(identifier);
+  if (!oq.ok) return fail(400, oq.message, oq.reason);
 
   // THREE ceilings, each broader than the last, ALL fail CLOSED. Per-identifier alone
   // was defeated by rotating the identifier (1.4 trace): a metered Resend email with no
@@ -227,7 +227,9 @@ async function otpVerify(request, env) {
   const identifier = normalizeIdentifier(body.identifier);
   const purpose = String(body.purpose || '');
   const code = String(body.code || '').trim();
-  if (!identifier || !code) return fail(400, 'Enter the code we sent you.');
+  const ov = emailOnly(identifier);
+  if (!ov.ok) return fail(400, ov.message, ov.reason);
+  if (!code) return fail(400, 'Enter the code we sent you.');
 
   const row = await env.DB.prepare(
     'SELECT * FROM otp_codes WHERE identifier = ? AND purpose = ? AND consumed_at IS NULL ' +
@@ -252,7 +254,7 @@ async function otpVerify(request, env) {
   }
 
   const user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ?').bind(identifier).first();
-  if (!user) return fail(404, 'No account found for this email or phone.');
+  if (!user) return fail(404, 'No account found for this email address.');
   await env.DB.prepare('UPDATE users SET verified = 1 WHERE id = ?').bind(user.id).run();
   const token = await signJwt({ sub: user.id, identifier }, env.JWT_SECRET);
   return ok({ token, user: publicUser(user) });
@@ -262,6 +264,8 @@ async function passwordReset(request, env) {
   const body = await readJson(request);
   if (!body) return fail(400, 'Invalid request.');
   const identifier = normalizeIdentifier(body.identifier);
+  const pr = emailOnly(identifier);
+  if (!pr.ok) return fail(400, pr.message, pr.reason);
   const password = String(body.password || '');
   if (password.length < 6) return fail(400, 'Password must be at least 6 characters.');
 
@@ -272,7 +276,7 @@ async function passwordReset(request, env) {
   }
 
   const user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ?').bind(identifier).first();
-  if (!user) return fail(404, 'No account found for this email or phone.');
+  if (!user) return fail(404, 'No account found for this email address.');
 
   const { hash, salt, iter } = await hashPassword(password);
   await env.DB.batch([

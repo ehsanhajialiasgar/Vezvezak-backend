@@ -9,8 +9,11 @@
 
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
-  identifier    TEXT NOT NULL UNIQUE,      -- email or phone, normalized lowercase
-  channel       TEXT NOT NULL,             -- 'email' | 'phone'
+  identifier    TEXT NOT NULL UNIQUE,      -- an EMAIL, normalized lowercase. Phone identifiers were removed
+                                           -- 2026-09-21: we send no SMS, so a phone account could never be recovered.
+  channel       TEXT NOT NULL,             -- always 'email' since 2026-09-21. The COLUMN is kept rather than
+                                           -- dropped: a destructive migration on a live database is the founder's
+                                           -- call, and the column costs nothing. It is never anything but 'email'.
   name          TEXT,
   pw_hash       TEXT NOT NULL,             -- base64 PBKDF2-SHA256 derived key
   pw_salt       TEXT NOT NULL,             -- base64 random 16 bytes
