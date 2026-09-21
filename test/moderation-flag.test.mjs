@@ -33,7 +33,12 @@ function bodyOf(name) {
 // keeps its real job, which is that nothing reaches env.AI while it is off (asserted below, unchanged).
 // A REVIEW is different and keeps its old default: an unmoderated review is marked awaiting_moderation rather
 // than shown as checked, because there the claim is about OUR check, not about the merchant's own listing.
-for (const [fn, closed] of [['moderateReview', /note: 'awaiting_moderation'/], ['moderateCatalogItem', /return 'live'/]]) {
+// moderateReview WAS IN THIS LIST and went with the in-app review feature on 2026-09-21 (the App Store is where
+// people review the app). What it proved about the flag is unchanged and is still proved here, over the function
+// that remains: nothing reaches env.AI while MODERATION_ENABLED is off, and the flag can never be what APPROVES
+// anything. The paragraph above about a review's different default is kept as the record of a decision, not as a
+// description of live code.
+for (const [fn, closed] of [['moderateCatalogItem', /return 'live'/]]) {
   t(`${fn} gates on MODERATION_ENABLED !== "1" and never lets the flag approve`, () => {
     const body = bodyOf(fn);
     const m = body.match(/if \(env\.MODERATION_ENABLED !== '1'\) (return [^\n;]+);/);

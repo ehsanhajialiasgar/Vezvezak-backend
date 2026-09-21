@@ -22,8 +22,6 @@
  *   GET  /auth/me              (Bearer)                          -> {user}
  *   POST /reviews/submit       {subject, stars, text}            -> {ok, id}
  *   GET  /reviews?subject=...                                    -> {reviews, count, average}
- *   POST /reviews/app          {stars, text}                     -> {approved, verifiedByServer}
- *   GET  /reviews/app/approved                                   -> {reviews}
  *   POST /merchants/submit     {storeName, address, ...}         -> {ok, id, status}
  *   GET  /health                                                 -> {ok, ...}
  */
@@ -371,6 +369,9 @@ export async function accountExport(request, env) {
     exportedAt: nowIso(),
     account,
     reviews: await q('SELECT id, subject, stars, text, lang, created_at FROM reviews WHERE user_id = ?'),
+    // KEPT ON PURPOSE (2026-09-21). The in-app review feature is removed and nothing writes this table any
+    // more, but the rows we already hold are still the user's data: an export that silently omitted them would
+    // be the opposite of what the policy promises. Deletion still clears it (DELETE_BY_USER_ID above).
     appReviews: await q('SELECT id, stars, text, approved, created_at FROM app_reviews WHERE user_id = ?'),
     merchants: await q('SELECT id, store_name, category, biz_type, seller_type, offer_type, sale_channel, showcase, radius_miles, commission_agreed, luxury_brand, luxury_cert, address, phone, website, status, submitted_at FROM merchants WHERE user_id = ?'),
     catalogItems: await q('SELECT id, merchant_id, title, brand, model, gtin, category, status, created_at FROM catalog_items WHERE user_id = ?'),
@@ -440,71 +441,13 @@ async function reviewsForSubject(request, env, url) {
  * must be real. Without an AI key we apply a deterministic quality check and
  * report `verifiedByServer` honestly rather than rubber-stamping.
  */
-async function appReview(request, env) {
-  const body = await readJson(request);
-  if (!body) return fail(400, 'Invalid request.');
-  const stars = Math.round(Number(body.stars));
-  const text = String(body.text || '').trim();
-  if (!(stars >= 1 && stars <= 5)) return fail(400, 'Stars must be between 1 and 5.');
 
-  const claims = await requireAuth(request, env);
-  const rl = await rateLimit(env, `appreview:${claims?.sub || (await ipHash(request, env))}`, 5, 24 * 60 * 60 * 1000);
-  if (!rl.allowed) return fail(429, 'Too many submissions today.');
+// moderateReview() WAS HERE and is removed with the feature it served (Ehsan 2026-09-21). It asked a model
+// whether a review OF THE APP was genuine, and its only caller was the /reviews/app handler. This is NOT the
+// extract.js case, where a tested guard was kept because the capability it protects is planned: here the
+// capability itself is deleted by decision, so the guard protects nothing that will exist. Product and store
+// reviews never used it — they are screened by screenCatalogText-style deterministic rules, not by this.
 
-  // Free (and anonymous) submissions never trigger a synchronous billable AI
-  // call — the review is stored unmoderated (awaiting_moderation). Paid tiers get
-  // live AI moderation. The gate lives inside moderateReview so env.AI is
-  // structurally unreachable for a free plan.
-  const plan = claims?.sub ? await planFor(env, claims.sub) : 'free';
-  const verdict = await moderateReview(env, stars, text, plan);
-  await env.DB.prepare(
-    'INSERT INTO app_reviews (id, user_id, stars, text, approved, reject_note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-  ).bind(uid('arv'), claims?.sub || null, stars, text, verdict.approved ? 1 : 0, verdict.note || null, nowIso()).run();
-
-  return json(200, { ok: true, approved: verdict.approved, verifiedByServer: verdict.byModel });
-}
-
-export async function moderateReview(env, stars, text, plan) {
-  // ZERO free-tier billable AI (Ehsan 2026-08-13): a free/anonymous submission is
-  // stored unmoderated and never reaches env.AI. Fail-closed reward gate is
-  // unchanged — unmoderated ⇒ not approved ⇒ no reward, no public wall.
-  // FLAG GATE (fail CLOSED), above the plan gate — see MODERATION_ENABLED in wrangler.toml. Two
-  // conditions, not one replacing the other: the flag decides whether the feature exists at all, the
-  // plan gate decides who pays for it. A published legal sentence must not rest on a database row.
-  if (env.MODERATION_ENABLED !== '1') return { approved: false, byModel: false, note: 'awaiting_moderation' };
-  if (!billableAiAllowed(plan)) return { approved: false, byModel: false, note: 'awaiting_moderation' };
-
-  const words = text.split(/\s+/).filter(Boolean);
-  // Only 4-5★ qualify for the wall/reward (Ehsan's rule); anything else is
-  // stored but not approved — we still want the signal.
-  if (stars < 4) return { approved: false, byModel: false, note: 'below_4_stars' };
-  if (text.length < 20 || words.length < 4) return { approved: false, byModel: false, note: 'too_short' };
-
-  if (!env.AI) return { approved: false, byModel: false, note: 'moderation_unavailable' };
-  try {
-    // Workers AI — asks for a strict yes/no on genuineness.
-    const r = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
-      messages: [
-        { role: 'system', content: 'You judge whether an app review is genuine and specific (not spam, not gibberish, not abusive). Answer with exactly one word: YES or NO.' },
-        { role: 'user', content: `Review (${stars} stars): ${text}` },
-      ],
-      max_tokens: 5,
-    });
-    const said = String(r?.response || '').trim().toUpperCase();
-    return { approved: said.startsWith('YES'), byModel: true, note: said.startsWith('YES') ? null : 'model_rejected' };
-  } catch {
-    // Fail CLOSED: if moderation can't run, do NOT approve — a reward must never
-    // be granted without a genuine check.
-    return { approved: false, byModel: false, note: 'model_error' };
-  }
-}
-
-async function approvedAppReviews(request, env) {
-  const { results } = await env.DB.prepare(
-    'SELECT stars, text, created_at FROM app_reviews WHERE approved = 1 ORDER BY created_at DESC LIMIT 50',
-  ).all();
-  return json(200, { reviews: results || [] });
-}
 
 // ── merchants ───────────────────────────────────────────────────────────────
 
@@ -1389,8 +1332,8 @@ export default {
 
       if (post && p === '/reviews/submit') return reviewSubmit(request, env);
       if (get && p === '/reviews') return reviewsForSubject(request, env, url);
-      if (post && p === '/reviews/app') return appReview(request, env);
-      if (get && p === '/reviews/app/approved') return approvedAppReviews(request, env);
+      // /reviews/app and /reviews/app/approved REMOVED 2026-09-21: the App Store is where people review the
+      // app. /reviews/submit and /reviews below are PRODUCT and store reviews — a different feature, untouched.
 
       if (post && p === '/merchants/submit') return merchantSubmit(request, env);
 

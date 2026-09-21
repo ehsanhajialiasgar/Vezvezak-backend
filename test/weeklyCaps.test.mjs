@@ -9,7 +9,7 @@ import {
   WEEKLY_CAPS, METERED_KINDS, PHOTO_PER_SEARCH, resolvePlan, planCaps, billableAiAllowed,
   refillSlot, windowStartFor, nextResetMs, shouldRefill, capReached,
 } from '../src/usage.js';
-import { moderateReview, moderateCatalogItem } from '../src/index.js';
+import { moderateCatalogItem } from '../src/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = (f) => readFileSync(resolve(HERE, '..', 'src', f), 'utf8');
@@ -111,38 +111,13 @@ await t('billable AI is allowed for paid tiers ONLY', () => {
   assert.equal(billableAiAllowed('max'), true);
   assert.equal(billableAiAllowed(undefined), false);   // absent ⇒ free ⇒ no AI
 });
-await t('moderateReview never touches env.AI on a free plan', async () => {
-  const trap = { AI: { run: () => { throw new Error('env.AI CALLED for a free user'); } } };
-  const v = await moderateReview(trap, 5, 'a genuine and specific review of this product', 'free');
-  assert.equal(v.approved, false);
-  assert.equal(v.byModel, false);
-  assert.equal(v.note, 'awaiting_moderation');
-});
-// TWO-CONDITION CONTRACT (Ehsan 2026-09-03). This assertion was 'moderateReview DOES moderate on a
-// paid plan' and had been GREEN SINCE 2026-08-13 — green for the WRONG REASON. It recorded
-// "paid ⇒ moderated" as an invariant, and that invariant IS the defect: it is exactly what made the
-// published privacy §5 ("no review or listing text is sent to any model today") depend on a row in
-// user_plans rather than on a code path. A test that documents a bug protects nothing. Both
-// directions are now pinned, so this asserts strictly MORE than the line it replaces.
-await t('flag OFF: a PAID plan is still NOT moderated — the flag holds §5, not the plan gate', async () => {
-  const trap = { MODERATION_ENABLED: '0', AI: { run: () => { throw new Error('env.AI CALLED with the flag off'); } } };
-  const v = await moderateReview(trap, 5, 'a genuine and specific review of this product', 'pro');
-  assert.equal(v.approved, false);
-  assert.equal(v.byModel, false);
-  assert.equal(v.note, 'awaiting_moderation');
-});
-await t('flag ON + paid plan: moderation runs (the feature is not dead, only held)', async () => {
-  const yes = { MODERATION_ENABLED: '1', AI: { run: async () => ({ response: 'YES' }) } };
-  const v = await moderateReview(yes, 5, 'a genuine and specific review of this product', 'pro');
-  assert.equal(v.approved, true);
-  assert.equal(v.byModel, true);
-});
-await t('flag ON + FREE plan: still not moderated — the plan gate survives underneath the flag', async () => {
-  const trap = { MODERATION_ENABLED: '1', AI: { run: () => { throw new Error('env.AI CALLED for a free user'); } } };
-  const v = await moderateReview(trap, 5, 'a genuine and specific review of this product', 'free');
-  assert.equal(v.byModel, false);
-  assert.equal(v.note, 'awaiting_moderation');
-});
+// THE FOUR moderateReview ASSERTIONS THAT WERE HERE WENT WITH THEIR FUNCTION (Ehsan 2026-09-21). They pinned a
+// genuinely good two-condition contract — flag OFF + paid plan is still NOT moderated, so published privacy §5
+// depended on a code path and not on a row in user_plans — but the function they pinned moderated reviews OF THE
+// APP, and that whole feature is removed: the App Store is where people review the app. The contract itself is
+// NOT lost: moderateCatalogItem below is the other half of §5 and carries the same two-condition shape, and
+// moderation-flag.test asserts it over the functions that still exist.
+
 await t('moderateCatalogItem never touches env.AI on a free plan (and the item is still reachable)', async () => {
   // The money invariant is unchanged and is what this trap proves: a free seller never triggers a billable AI
   // call. What changed on 2026-09-18 is where the unmoderated item LANDS — 'live' and labelled, instead of a
