@@ -9,7 +9,8 @@
  *   Art.4  no money moves through here — there is no payment endpoint, by design.
  *   Art.7  passwords are hashed (PBKDF2), IPs are hashed, and no income/expense
  *          or individual economic profile is ever accepted or stored.
- *   Art.3  merchants are introductions: `status` starts 'pending' and nothing
+ *   Art.3  merchants are introductions: a submitted store is 'live' at once, labelled listed-by-the-merchant
+ *          and unverified. Verification is a SEPARATE record (verifications) and nothing
  *          here asserts a guarantee about any seller.
  *
  * Routes:
@@ -27,7 +28,7 @@
  *   GET  /health                                                 -> {ok, ...}
  */
 
-import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly } from './lib.js';
+import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly, mustAffect, mustAffectAll } from './lib.js';
 import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
@@ -244,7 +245,8 @@ async function otpVerify(request, env) {
     await env.DB.prepare('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?').bind(row.id).run();
     return fail(400, 'That code is not correct.');
   }
-  await env.DB.prepare('UPDATE otp_codes SET consumed_at = ? WHERE id = ?').bind(Date.now(), row.id).run();
+  mustAffect(await env.DB.prepare('UPDATE otp_codes SET consumed_at = ? WHERE id = ?').bind(Date.now(), row.id).run(),
+    'consuming the one-time code');   // a code that is not consumed can be used again
 
   if (purpose === 'reset') {
     const resetToken = uid('rst');
@@ -255,7 +257,8 @@ async function otpVerify(request, env) {
 
   const user = await env.DB.prepare('SELECT * FROM users WHERE identifier = ?').bind(identifier).first();
   if (!user) return fail(404, 'No account found for this email address.');
-  await env.DB.prepare('UPDATE users SET verified = 1 WHERE id = ?').bind(user.id).run();
+  mustAffect(await env.DB.prepare('UPDATE users SET verified = 1 WHERE id = ?').bind(user.id).run(),
+    'marking the account verified');
   const token = await signJwt({ sub: user.id, identifier }, env.JWT_SECRET);
   return ok({ token, user: publicUser(user) });
 }
@@ -279,11 +282,13 @@ async function passwordReset(request, env) {
   if (!user) return fail(404, 'No account found for this email address.');
 
   const { hash, salt, iter } = await hashPassword(password);
-  await env.DB.batch([
+  // BOTH must land. A password UPDATE that matches nothing would return a fresh token to someone who is being
+  // told their password changed, and a reset token that is not marked used stays spendable.
+  mustAffectAll(await env.DB.batch([
     env.DB.prepare('UPDATE users SET pw_hash = ?, pw_salt = ?, pw_iter = ? WHERE id = ?')
       .bind(hash, salt, iter, user.id),
     env.DB.prepare('UPDATE reset_tokens SET used_at = ? WHERE token = ?').bind(Date.now(), row.token),
-  ]);
+  ]), [0, 1], 'resetting the password');
   const token = await signJwt({ sub: user.id, identifier }, env.JWT_SECRET);
   return ok({ token, user: publicUser(user) });
 }
@@ -346,7 +351,11 @@ export async function accountDelete(request, env) {
   // The account itself LAST.
   stmts.push(P('DELETE FROM users WHERE id = ?', uid));
 
-  await env.DB.batch(stmts);   // one atomic transaction
+  // ONE statement here is load-bearing: the users row. The rest may legitimately match nothing — an account
+  // with no reviews, no store, no referral code — so asserting that all of them landed would fail on a clean
+  // account. The app says "your account and its data were deleted"; that sentence rests on this index.
+  const usersIdx = stmts.length - 1;   // DELETE FROM users was pushed last
+  mustAffectAll(await env.DB.batch(stmts), [usersIdx], 'deleting the account');
   return ok({ deleted: true });
 }
 
@@ -539,10 +548,14 @@ async function merchantSubmit(request, env) {
     // question nobody was put. Only an explicit true or false is recorded; anything else is NULL, never asked.
     body.commissionAgreed === true ? 1 : body.commissionAgreed === false ? 0 : null,
     text(body.luxuryBrand, 120), text(body.luxuryCert, 200),
-    'pending', body.submittedAt || nowIso(),
+    'live', body.submittedAt || nowIso(),   // D1: live on submit — there is no reviewer, see the note below
   ).run();
   // 'pending' — listing is an introduction awaiting review, never a guarantee.
-  return ok({ id, status: 'pending' });
+  // D1 (Ehsan 2026-09-21): this said 'pending', and NOTHING in the backend ever moved a merchant off it — there
+  // is no reviewer and no queue. A status that never changes is not a state machine, it is a label that misleads
+  // the one person who reads it. A submitted store is LIVE, under the label it has always carried: listed by the
+  // merchant, unverified. Verification is a separate record in the verifications table and is unaffected.
+  return ok({ id, status: 'live' });
 }
 
 // ── referrals ───────────────────────────────────────────────────────────────

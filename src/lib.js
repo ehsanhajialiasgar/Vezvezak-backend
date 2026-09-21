@@ -158,6 +158,35 @@ export function emailOnly(identifier) {
   return { ok: true };
 }
 
+// ── A WRITE THAT MUST LAND (Ehsan 2026-09-21, D3) ───────────────────────────────────────────────────────────
+// D1 resolves an UPDATE that matches ZERO rows exactly like one that matched a thousand: no error, no signal.
+// Of 28 .run() calls, four read `changes`, and the four that did were the ones where zero rows is a MEANINGFUL
+// answer — the weekly cap and the photo ceiling both rely on "the conditional UPDATE matched nothing" to mean
+// "you are at the limit". That is correct and is left alone.
+//
+// The rest are different: a password that must be changed, a one-time code that must be consumed, an account
+// that must be deleted. There, zero rows means the thing we are about to TELL THE USER WE DID did not happen —
+// and the user is told anyway. This makes that impossible to do quietly.
+//
+// It returns the result so a caller can still read `changes` when it wants the number.
+export function mustAffect(result, what) {
+  const changed = result?.meta?.changes;
+  if (changed === undefined) {
+    // A driver that stops reporting `changes` must not silently turn this check into a no-op.
+    throw new Error(`COULD NOT VERIFY: ${what} — the database reported no row count`);
+  }
+  if (changed < 1) throw new Error(`${what} affected no rows`);
+  return result;
+}
+
+// The same question for a batch: every statement that MUST land, landed. D1 returns one result per statement in
+// order, so the caller names which indexes are load-bearing rather than asserting that all of them are (a
+// deletion batch legitimately includes statements that match nothing — a user with no reviews).
+export function mustAffectAll(results, indexes, what) {
+  for (const i of indexes) mustAffect(results?.[i], `${what} [statement ${i}]`);
+  return results;
+}
+
 // ── rate limiting (fixed window, D1-backed) ─────────────────────────────────
 // RATE-LIMIT KEYS HOLD NO IDENTIFIER, AND EXPIRED COUNTERS ARE REMOVED (Ehsan 2026-09-15).
 // The bucket name used to be stored as written — `login:<email>`, `otp:<phone>` — in plain text, and a row was only
