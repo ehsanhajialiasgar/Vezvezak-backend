@@ -58,7 +58,11 @@ export function appleConfig(env) {
 
 // App Store Connect API JWT: ES256, audience appstoreconnect-v1, lifetime well under Apple's 60-minute cap.
 export async function signAppleJwt(cfg, nowSec = Math.floor(Date.now() / 1000)) {
-  const pem = cfg.privateKey.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+  // A PASTED .p8 ARRIVES IN MORE THAN ONE SHAPE (Ehsan 2026-09-22). Whitespace and the BEGIN/END lines were
+  // already stripped; a literal backslash-n — what a key pasted through a shell or a JSON field looks like —
+  // was not, and survives \s+ as the two characters \ and n, which makes atob throw. Both are removed here,
+  // because the person setting the secret cannot see which shape they produced.
+  const pem = cfg.privateKey.replace(/\\n/g, '').replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
   const der = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
   const key = await crypto.subtle.importKey('pkcs8', der, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
   const header = { alg: 'ES256', kid: cfg.keyId, typ: 'JWT' };
@@ -83,7 +87,14 @@ export function decodeJwsPayload(jws) {
 // Ask Apple. Production first; a 404 there means "not a production transaction", so try Sandbox (Apple's
 // documented order). Any other non-200, or any network failure, is an unknown.
 export async function fetchTransaction(transactionId, cfg, fetchImpl = fetch, nowSec) {
-  const token = await signAppleJwt(cfg, nowSec);
+  // THE FIRST STEP WAS THE ONLY UNGUARDED ONE (Ehsan 2026-09-22). Every HTTP status and every network failure
+  // below is named; signing was not, so a key that will not load — the wrong format, a bad paste, the wrong
+  // kind of key — escaped as an unhandled worker exception and reached the app as HTTP 500 `error code: 1101`.
+  // Measured live on production the day the secrets went in: a 500 with nothing to read, which is the same
+  // blindness the merchant duplicate-name fix was about.
+  let token;
+  try { token = await signAppleJwt(cfg, nowSec); }
+  catch { return { ok: false, reason: 'apple_key_unusable' }; }
   for (const env of ['Production', 'Sandbox']) {
     let res;
     try {
@@ -160,4 +171,35 @@ export async function iapValidate(request, env, fetchImpl = fetch) {
   ).bind(claims.sub, verdict.plan, verdict.expiresAt, verdict.originalTransactionId, fetched.environment, nowIso()).run();
 
   return json(200, { ok: true, plan: verdict.plan, expiresAt: verdict.expiresAt, environment: fetched.environment });
+}
+
+// IS THIS KEY THE RIGHT KEY? — the question a 401 cannot answer on its own (Ehsan 2026-09-22).
+//
+// The App Store Server API and the App Store Connect API take DIFFERENT keys, and both are generated on the
+// same page. A Team Key authenticates against App Store Connect and is refused by the Server API, which is
+// exactly the failure that looks like "the secret is wrong" when the secret is perfectly fine and simply of
+// the wrong kind. Apple's own documented probe is the sandbox test-notification endpoint, which sends nothing
+// to anybody and only reports whether the caller is authorised.
+//
+// It returns a STATUS and a reason. Never the key, never the token, never any part of either.
+export async function appleKeyProbe(cfg, fetchImpl = fetch, nowSec) {
+  let token;
+  try { token = await signAppleJwt(cfg, nowSec); }
+  catch (e) { return { keyLoads: false, reason: 'apple_key_unusable', detail: String(e?.name || 'error') }; }
+  try {
+    const res = await fetchImpl(`${APPLE_HOSTS.Sandbox}/inApps/v1/notifications/test`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    });
+    return {
+      keyLoads: true,
+      status: res.status,
+      // 200/202 → the key is accepted by the SERVER API. 401 → it loads and signs, but Apple will not take it
+      // here, which for a well-formed ES256 JWT means the key is not an In-App Purchase key.
+      reason: res.status === 200 || res.status === 202 ? 'ok'
+        : res.status === 401 ? 'apple_rejected_key'
+        : `apple_http_${res.status}`,
+    };
+  } catch {
+    return { keyLoads: true, reason: 'apple_unreachable' };
+  }
 }

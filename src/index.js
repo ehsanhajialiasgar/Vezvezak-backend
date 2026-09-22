@@ -28,7 +28,7 @@
 
 import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly, mustAffect, mustAffectAll } from './lib.js';
 import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
-import { iapValidate } from './iap.js';
+import { iapValidate, appleConfig, appleKeyProbe } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
 import { codeEmail, SUPPORT_EMAIL } from './mailTemplate.js';
@@ -615,6 +615,30 @@ async function merchantSubmit(request, env) {
   // the one person who reads it. A submitted store is LIVE, under the label it has always carried: listed by the
   // merchant, unverified. Verification is a separate record in the verifications table and is unaffected.
   return ok({ id, status: 'live' });
+}
+
+// WHETHER APPLE ACCEPTS OUR KEY — and nothing else (Ehsan 2026-09-22).
+//
+// Built because a 500 with `error code: 1101` is not a diagnosis. Apple's sandbox test-notification endpoint
+// is the documented way to ask "is this caller authorised" without sending anything to anybody. Authenticated
+// and rate-limited, because it is an egress path; it answers a status and a reason and never any part of the
+// key, the token or the issuer.
+async function iapDiagnose(request, env) {
+  const claims = await requireAuth(request, env);
+  if (!claims?.sub) return fail(401, 'Sign in first.', 'auth_required');
+  const rl = await rateLimit(env, `iapdiag:${claims.sub}`, 20, 60 * 60 * 1000);
+  if (!rl.allowed) return fail(429, `Too many checks. Please wait ${waitPhrase(rl.retryAfterMs)}.`, 'rate_limited', rl.retryAfterMs);
+
+  const cfg = appleConfig(env);
+  if (!cfg) {
+    // WHICH of the four is missing — the name only, never the value. A list of absent names is exactly what
+    // the person setting them needs and reveals nothing about the ones that are set.
+    const missing = ['APPLE_ISSUER_ID', 'APPLE_KEY_ID', 'APPLE_PRIVATE_KEY', 'APPLE_BUNDLE_ID']
+      .filter(k => !(typeof env[k] === 'string' && env[k].trim()));
+    return json(200, { ok: false, configured: false, missing, reason: 'iap_not_configured' });
+  }
+  const probe = await appleKeyProbe(cfg);
+  return json(200, { ok: probe.reason === 'ok', configured: true, ...probe });
 }
 
 // ── referrals ───────────────────────────────────────────────────────────────
@@ -1484,6 +1508,7 @@ export default {
       if (post && p === '/usage/status') return usageStatus(request, env);
       // Deprecated advisory shims (removed in the Part 2 client migration).
       if (post && p === '/iap/validate') return iapValidate(request, env);
+      if (post && p === '/iap/diagnose') return iapDiagnose(request, env);
       if (post && p === '/comp/redeem') return compRedeem(request, env);
       if (post && p === '/usage/check') return usageCheck(request, env);
       if (post && p === '/usage/record') return usageRecord(request, env);

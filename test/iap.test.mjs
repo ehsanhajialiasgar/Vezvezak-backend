@@ -43,13 +43,22 @@ await t('appleConfig is NULL unless every credential is present — a partial co
 // in the context it runs in is noise, not a guard. So, the shape already used by spend-reachability-gate:
 // VZ_CROSS_REPO=required makes an absent app repo a HARD failure; otherwise this one check is skipped LOUDLY
 // and the count below says so. Locally, where both repos sit side by side, it runs and it bites.
-const APP_IAP = process.env.VZ_APP_DIR ? `${process.env.VZ_APP_DIR}/src/services/iapService.ts` : '../VezvezakNew/src/services/iapService.ts';
-if (!existsSync(APP_IAP)) {
-  if (process.env.VZ_CROSS_REPO === 'required') { console.error(`✗ COULD NOT VERIFY — VZ_CROSS_REPO=required but ${APP_IAP} is absent.`); process.exit(1); }
-  console.log(`  ⚠ NOT EXAMINED: backend PRODUCT_PLANS vs the app's PRODUCT_IDS — ${APP_IAP} is absent in this checkout. Runs locally.`);
+// WHERE THE APP KEEPS THE IDS (2026-09-22). The table moved from iapService.ts to iapDecisions.ts the day
+// StoreKit was wired — iapService gained react-native imports, and the pure table had to live somewhere a test
+// can read. This reads BOTH files and unions them, so the next move does not silently empty the set; the
+// non-empty assertion below is what turns "I found nothing" into a failure instead of a pass.
+const APP_DIR = process.env.VZ_APP_DIR || '../VezvezakNew';
+const APP_IAP_FILES = [`${APP_DIR}/src/services/iapDecisions.ts`, `${APP_DIR}/src/services/iapService.ts`];
+const APP_IAP = APP_IAP_FILES.find(f => existsSync(f));
+if (!APP_IAP) {
+  if (process.env.VZ_CROSS_REPO === 'required') { console.error(`✗ COULD NOT VERIFY — VZ_CROSS_REPO=required but none of ${APP_IAP_FILES.join(', ')} is present.`); process.exit(1); }
+  console.log(`  ⚠ NOT EXAMINED: backend PRODUCT_PLANS vs the app's PRODUCT_IDS — the app repo is absent in this checkout. Runs locally.`);
 } else await t('product map covers exactly the four ids the app defines, and nothing else grants', () => {
-  const app = readFileSync(APP_IAP, 'utf8');
-  const ids = [...app.matchAll(/'(vez_[a-z_]+)'/g)].map(m => m[1]).sort();
+  const ids = [...new Set(APP_IAP_FILES.filter(existsSync)
+    .flatMap(f => [...readFileSync(f, 'utf8').matchAll(/'(vez_[a-z_]+)'/g)].map(m => m[1])))].sort();
+  // A COMPARISON NEEDS TWO SIDES. An empty list compares equal to an empty list, so a table that moved out of
+  // every file this reads would pass as "they match" — which is what happened here in reverse.
+  assert.ok(ids.length > 0, `no vez_* product id found in ${APP_IAP_FILES.join(' or ')} — the table moved again; re-anchor this check`);
   assert.deepEqual(Object.keys(PRODUCT_PLANS).sort(), ids, 'backend PRODUCT_PLANS must match the app PRODUCT_IDS exactly');
 });
 
