@@ -31,6 +31,7 @@ import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
+import { codeEmail, SUPPORT_EMAIL } from './mailTemplate.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
@@ -206,7 +207,11 @@ async function sendCode(env, identifier, code, purpose) {
   // and EVERY emailed sign-up code since the app existed returned this 503. Nobody could tell, because the
   // sentence invited them to wait.
   if (!env.RESEND_API_KEY) return mailFailure(MAIL_FAIL.notConfigured);
-  const subject = purpose === 'reset' ? 'Your Vezvezak password reset code' : 'Your Vezvezak verification code';
+  // ONE LINE OF PLAIN TEXT FROM A NAME NOBODY KNOWS is the shape of a phishing message and the shape of a message
+  // a mail client files under junk (Ehsan 2026-09-22). The template carries the wordmark as TEXT in the brand
+  // colour — no images at all, so opening it contacts no third-party host — and a plain-text alternative with the
+  // same words. There is no link in it, so there is nothing to click and nothing to track.
+  const { subject, html, text } = codeEmail(code, purpose, Math.round(OTP_TTL_MS / 60000));
   let res;
   try {
     res = await fetch('https://api.resend.com/emails', {
@@ -215,8 +220,11 @@ async function sendCode(env, identifier, code, purpose) {
       body: JSON.stringify({
         from: env.MAIL_FROM || 'Vezvezak <noreply@vezvezak.com>',
         to: [identifier],
+        // A reply to a code should reach a person, not bounce off noreply@ (Ehsan 2026-09-22).
+        reply_to: SUPPORT_EMAIL,
         subject,
-        text: `Your Vezvezak code is ${code}\n\nIt expires in 10 minutes. If you didn't request it, ignore this email.`,
+        html,
+        text,
       }),
     });
   } catch {

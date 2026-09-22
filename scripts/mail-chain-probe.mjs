@@ -13,7 +13,13 @@ import { execSync } from 'node:child_process';
 const API = 'https://vezvezak-api.gfmnhs8y8r.workers.dev';
 const TO = process.argv[2] || 'ehsan@vezvezak.com';
 const DOMAIN = TO.split('@')[1];
-const dig = a => { try { return execSync(`dig +short ${a}`, { encoding: 'utf8' }).trim(); } catch { return ''; } };
+// dig answers with one line per record. Joining them with a separator keeps a two-record answer (an MX pair, a
+// CNAME beside a TXT) on ONE row — the first run printed the second line at column 0 and it read like a broken
+// value. `only` keeps the lines that actually answer the question asked, so a CNAME in the middle of a TXT
+// lookup does not masquerade as the TXT.
+const digLines = a => { try { return execSync(`dig +short ${a}`, { encoding: 'utf8' }).trim().split('\n').filter(Boolean); } catch { return []; } };
+const dig = (a, only) => digLines(a).filter(l => !only || only(l)).join(' · ');
+const isTxt = l => l.startsWith('"');
 const line = (label, v, verdict) => console.log(`  ${label.padEnd(26)} ${verdict}  ${v || '—'}`);
 
 console.log(`\nMAIL CHAIN — ${TO}\n`);
@@ -35,11 +41,11 @@ if (body.error) console.log(`  ${''.padEnd(26)}    said: ${body.error}`);
 
 // 2 · DNS, as it actually stands
 console.log('\n2 · DNS for ' + DOMAIN);
-const spf = dig(`TXT ${DOMAIN}`).split('\n').find(l => l.includes('v=spf1')) || '';
-const dmarc = dig(`TXT _dmarc.${DOMAIN}`);
-const dkim = dig(`TXT resend._domainkey.${DOMAIN}`);
+const spf = digLines(`TXT ${DOMAIN}`).find(l => l.includes('v=spf1')) || '';
+const dmarc = digLines(`TXT _dmarc.${DOMAIN}`).find(l => l.includes('v=DMARC1')) || '';
+const dkim = dig(`TXT resend._domainkey.${DOMAIN}`, isTxt);
 const sendMx = dig(`MX send.${DOMAIN}`);
-const sendSpf = dig(`TXT send.${DOMAIN}`);
+const sendSpf = digLines(`TXT send.${DOMAIN}`).find(l => l.includes('v=spf1')) || '';
 line('SPF (root)', spf, spf ? '·' : '✗');
 line('DMARC', dmarc, dmarc ? '✓' : '✗');
 line('DKIM resend._domainkey', dkim ? dkim.slice(0, 60) + '…' : '', dkim ? '✓' : '✗');
@@ -58,6 +64,7 @@ if (reason === 'providerRejected') missing.push('Resend refused us: the key is w
 if (status !== 200 && reason === '(none)' && !oldNotConfigured) missing.push(`the Worker refused with HTTP ${status} and no reason — it predates the reason-carrying build, or something else refused; deploy and re-run before trusting this line`);
 if (!dkim) missing.push(`no DKIM at resend._domainkey.${DOMAIN} — add the record Resend shows after you add the domain`);
 if (!dmarc) missing.push(`no DMARC at _dmarc.${DOMAIN} — without it, inboxes decide on their own`);
+else if (!/\bp=(none|quarantine|reject)\b/.test(dmarc)) missing.push(`the DMARC record at _dmarc.${DOMAIN} has no policy (p=) — it is present but says nothing`);
 if (!missing.length) console.log('  nothing — a code was accepted for sending. Check the inbox; that is the only link this cannot measure.');
 else for (const m of missing) console.log(`  ✗ ${m}`);
 console.log('');
