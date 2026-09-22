@@ -276,16 +276,32 @@ async function otpVerify(request, env) {
   if (!ov.ok) return fail(400, ov.message, ov.reason);
   if (!code) return fail(400, 'Enter the code we sent you.');
 
-  const row = await env.DB.prepare(
+  // A CODE THAT IS CORRECT BUT SUPERSEDED IS NOT AN INCORRECT CODE (Ehsan 2026-09-22, hit on production).
+  //
+  // This read the NEWEST unconsumed row only. Ask for a code twice — which "resend" is, and which anyone with
+  // two unread emails has done — and the older one is answered "That code is not correct." It is correct. It
+  // has been replaced, and the person is now staring at a digit they just copied carefully, being told they
+  // cannot read. The founder hit this within a minute of the feature going live.
+  //
+  // The older code is still REFUSED: accepting it would widen the window every resend. Only the sentence
+  // changes, to the one that says what to do — open the newest email.
+  const { results: open } = await env.DB.prepare(
     'SELECT * FROM otp_codes WHERE identifier = ? AND purpose = ? AND consumed_at IS NULL ' +
-    'ORDER BY created_at DESC LIMIT 1',
-  ).bind(identifier, purpose).first();
+    'ORDER BY created_at DESC LIMIT 10',
+  ).bind(identifier, purpose).all();
+  const row = (open || [])[0];
 
   if (!row) return fail(400, 'That code is not valid. Please request a new one.');
   if (row.expires_at < Date.now()) return fail(400, 'That code has expired. Please request a new one.');
   if (row.attempts >= OTP_MAX_ATTEMPTS) return fail(429, 'Too many wrong attempts. Please request a new code.');
 
-  if (row.code_hash !== (await sha256(code))) {
+  const offered = await sha256(code);
+  if (row.code_hash !== offered) {
+    // Superseded, not wrong: it matches an earlier code we sent for the same purpose and have not consumed.
+    // It costs no attempt, because it is not a guess.
+    if ((open || []).some(r => r.code_hash === offered)) {
+      return fail(400, 'That code has been replaced by a newer one. Open the most recent email we sent you.', 'otp_superseded');
+    }
     await env.DB.prepare('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?').bind(row.id).run();
     return fail(400, 'That code is not correct.');
   }

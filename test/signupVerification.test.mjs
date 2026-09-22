@@ -124,6 +124,10 @@ globalThis.fetch = async (url, init) => {
   return realFetch(url, init);
 };
 const codeOf = m => (m.text.match(/^\s*(\d{6})\s*$/m) || [])[1];
+// ADDRESSED, not "the last one sent" (2026-09-22). Reading inbox[last] couples every test to the order of all
+// the others: adding one above silently handed the next test a code for a different person, and it failed with
+// "That code is not correct" — which is exactly the defect being tested two lines up, arriving as noise.
+const codeFor = who => { const m = [...inbox].reverse().find(x => x.to?.[0] === who); assert.ok(m, `no message was sent to ${who}`); return codeOf(m); };
 const post = async (path, body) => {
   const res = await worker.fetch(new Request(`https://api.test${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -160,17 +164,46 @@ await t('a WRONG code is refused, and says so', async () => {
 });
 
 await t('RESEND gives a new code, and the OLD one is then refused', async () => {
-  const first = codeOf(inbox[inbox.length - 1]);
+  const first = codeFor(NEW);
   const r = await post('/auth/otp/request', { identifier: NEW, purpose: 'signup' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  const second = codeOf(inbox[inbox.length - 1]);
+  const second = codeFor(NEW);
   assert.notEqual(first, second, 'a resend that returns the same code is not a resend');
   const old = await post('/auth/otp/verify', { identifier: NEW, code: first, purpose: 'signup' });
   assert.notEqual(old.status, 200, 'only the newest code may work');
 });
 
+await t('a code that is CORRECT but superseded is not called incorrect — and costs no attempt', async () => {
+  // Hit on production within a minute of the feature going live: two codes in the inbox, the older one pasted,
+  // answered "That code is not correct." It was correct. otpVerify read the newest row only.
+  const WHO = 'superseded@vezvezak.com';
+  await post('/auth/signup', { identifier: WHO, password: 'superpass2609' });
+  const older = codeFor(WHO);
+  await post('/auth/otp/request', { identifier: WHO, purpose: 'signup' });
+  const newer = codeFor(WHO);
+  assert.notEqual(older, newer);
+
+  const before = db.prepare('SELECT attempts FROM otp_codes WHERE identifier = ? ORDER BY created_at DESC LIMIT 1').get(WHO).attempts;
+  const r = await post('/auth/otp/verify', { identifier: WHO, code: older, purpose: 'signup' });
+  assert.equal(r.status, 400, JSON.stringify(r.body));
+  assert.equal(r.body.reason, 'otp_superseded', `the older code must be named, not called wrong: ${JSON.stringify(r.body)}`);
+  assert.match(r.body.error, /most recent email/i, 'and the sentence must say what to do');
+  assert.doesNotMatch(r.body.error, /not correct/i, 'because it IS correct');
+  const after = db.prepare('SELECT attempts FROM otp_codes WHERE identifier = ? ORDER BY created_at DESC LIMIT 1').get(WHO).attempts;
+  assert.equal(after, before, 'a superseded code is not a guess, so it must not spend an attempt');
+
+  // NEGATIVE: a code that matches NOTHING is still refused as incorrect, and still costs an attempt.
+  const bad = await post('/auth/otp/verify', { identifier: WHO, code: '000000', purpose: 'signup' });
+  assert.match(bad.body.error, /not correct/i);
+  assert.notEqual(bad.body.reason, 'otp_superseded');
+  assert.equal(db.prepare('SELECT attempts FROM otp_codes WHERE identifier = ? ORDER BY created_at DESC LIMIT 1').get(WHO).attempts, before + 1);
+
+  // And the newest one still works.
+  assert.equal((await post('/auth/otp/verify', { identifier: WHO, code: newer, purpose: 'signup' })).status, 200);
+});
+
 await t('the code CONFIRMS the account, and only then does the password work', async () => {
-  const r = await post('/auth/otp/verify', { identifier: NEW, code: codeOf(inbox[inbox.length - 1]), purpose: 'signup' });
+  const r = await post('/auth/otp/verify', { identifier: NEW, code: codeFor(NEW), purpose: 'signup' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.ok(r.body.token, 'confirming is what hands over the session sign-up withheld');
   assert.equal(db.prepare('SELECT verified FROM users WHERE identifier = ?').get(NEW).verified, 1);
@@ -179,7 +212,7 @@ await t('the code CONFIRMS the account, and only then does the password work', a
 });
 
 await t('a code already used cannot be reused', async () => {
-  const used = codeOf(inbox[inbox.length - 1]);
+  const used = codeFor(NEW);
   const r = await post('/auth/otp/verify', { identifier: NEW, code: used, purpose: 'signup' });
   assert.notEqual(r.status, 200);
 });
@@ -187,7 +220,7 @@ await t('a code already used cannot be reused', async () => {
 await t('an EXPIRED code is refused, and says it expired rather than that it is wrong', async () => {
   const WHO = 'expiry@vezvezak.com';
   await post('/auth/signup', { identifier: WHO, password: 'expirypass26' });
-  const code = codeOf(inbox[inbox.length - 1]);
+  const code = codeFor(WHO);
   db.prepare('UPDATE otp_codes SET expires_at = ? WHERE identifier = ?').run(Date.now() - 1000, WHO);
   const r = await post('/auth/otp/verify', { identifier: WHO, code, purpose: 'signup' });
   assert.notEqual(r.status, 200);
@@ -232,7 +265,7 @@ await t('a password RESET also confirms the address — no session past a gate t
   const WHO = 'resetconfirms@vezvezak.com';
   await post('/auth/signup', { identifier: WHO, password: 'firstpass2609' });
   await post('/auth/otp/request', { identifier: WHO, purpose: 'reset' });
-  const v = await post('/auth/otp/verify', { identifier: WHO, code: codeOf(inbox[inbox.length - 1]), purpose: 'reset' });
+  const v = await post('/auth/otp/verify', { identifier: WHO, code: codeFor(WHO), purpose: 'reset' });
   assert.ok(v.body.resetToken, JSON.stringify(v.body));
   const r = await post('/auth/password/reset', { identifier: WHO, resetToken: v.body.resetToken, password: 'secondpass2609' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
