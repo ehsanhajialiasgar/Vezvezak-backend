@@ -25,7 +25,11 @@
 //     Anything it cannot resolve — split traffic, an unknown etag, a tag git does not know — blocks the deploy.
 //   • Wrangler lists only the most recent versions; more untagged secret changes than that since the last deploy
 //     leaves the tagged one out of view and the gate blocks (safe direction).
-//   • `npx wrangler deploy` run by hand bypasses npm's predeploy. Deploy with `npm run deploy`.
+//   • `npx wrangler deploy` run by hand bypasses npm's predeploy AND writes no tag, so the live version becomes
+//     unidentifiable until someone probes it. Deploy with `npm run deploy`. When the gate cannot resolve a version
+//     it prints the recovery procedure (see recovery()) instead of only refusing.
+//   • The live etag CANNOT be reproduced locally: it is not a sha256 of the `wrangler deploy --dry-run` bundle
+//     (measured 2026-09-22 — live f6b1dc7c…, local 36ccded3… for the same commit). Identification is by probe.
 //   • Containment only: a phrase present on the page is not proof the sentence around it is right (a person reads it).
 //   • It sees SQL literals in src/. A column written through a dynamically built statement would be invisible.
 import { execSync } from 'node:child_process';
@@ -37,7 +41,18 @@ import { join } from 'node:path';
 // Empty since 2026-09-16 (runbook step 4): the 1d026f5 entry (etag 77ff5c8b…, versions 13a34f7b / 811f8393 — found by
 // the /extract probe) was removed once tagged deploys existed and the derivation had resolved through a tag
 // (23344686) and through a same-etag secret change (48d1bab6 → 23344686). Add an entry only with probe evidence.
-const UNTAGGED = {};
+const UNTAGGED = {
+  // Live version f2061d94 (uploaded 2026-09-22T09:46:33Z) by a hand-run `npx wrangler deploy`, which carries no
+  // --tag. IDENTIFIED BY PROBE, not by date arithmetic — two probes against the live worker, each answering
+  // differently on the two candidate commits, run 2026-09-22:
+  //   ≥ 411ace1 · GET /health 200 (the worker answers) · GET /reviews 400 (so /reviews/* is not blanket-404)
+  //               · GET /reviews/app/approved 404 and POST /reviews/app 404 — both routes 411ace1 deleted.
+  //   < 0f1883b · GET /merchants/mine returns no `address` or `phone` key (0f1883b widened that SELECT)
+  //               · POST /merchants/submit with a name the owner already has → HTTP 500 `error code: 1101`,
+  //                 the unhandled UNIQUE violation that 0f1883b replaced with a 409 naming the rule.
+  // 0f1883b's parent IS 411ace1 with no commit between them, so the two bounds meet on exactly one commit.
+  f6b1dc7c12e8cb9592510a8955d881f2fc3244e6249c6db30f8581cd2ea04771: '411ace1',
+};
 const WRANGLER = (JSON.parse(readFileSync('package.json', 'utf8')).scripts.deploy.match(/^npx --yes (wrangler@\d+\.\d+\.\d+) deploy --tag /) || [])[1];
 const wrangler = args => JSON.parse(execSync(`npx --yes ${WRANGLER} ${args} --json`, { encoding: 'utf8', env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 32e6 }));
 const TAG = v => v?.annotations?.['workers/tag'];
@@ -60,10 +75,48 @@ function liveBaseline() {
     }
     if (!sha && UNTAGGED[etag]) [sha, how] = [UNTAGGED[etag], `recorded untagged upload, live ${id.slice(0, 8)} etag ${etag.slice(0, 8)}`];
   }
-  if (!sha) throw new Error(`live version ${id} (etag ${etag.slice(0, 12)}) matches no tagged version and no recorded upload — find what is running (a probe that answers differently between versions) and record it`);
+  if (!sha) throw new Error(`live version ${id} (etag ${etag.slice(0, 12)}) matches no tagged version and no recorded upload\n${recovery(id, etag, live)}`);
   try { execSync(`git cat-file -e ${sha}^{commit}`, { stdio: 'ignore' }); } catch { throw new Error(`live commit ${sha} (${how}) is not in this repository`); }
   return [sha, how];
 }
+// WHAT TO DO WHEN THE GATE CANNOT SEE (Ehsan 2026-09-22). A hand-run `npx wrangler deploy` skips npm's predeploy
+// AND carries no --tag, so nothing on Cloudflare says which commit is running. It happened; the refusal was correct
+// and the message gave no way out, so the recovery took an investigation instead of a procedure.
+//
+// This does NOT guess. It puts the three things the investigation needs on screen — the upload time, the commits
+// that could have produced it, and the exact line to paste — and then still demands a PROBE, because a commit that
+// merely predates the upload is a candidate, never an answer. (An earlier idea, matching Cloudflare's etag against
+// a local `wrangler deploy --dry-run` bundle hash, was tried and does not work: the etag is not a sha256 of the
+// bundle — measured 2026-09-22, live f6b1dc7c… vs local 36ccded3… for the same commit.)
+function recovery(id, etag, live) {
+  const uploaded = live?.metadata?.created_on;
+  let candidates = '';
+  try {
+    // Commits whose committer date is before the upload, newest first — the upload can only have come from one of
+    // these, and almost always the first. Listed as candidates to PROBE, not as a conclusion.
+    const log = execSync(`git log --format='%h %cI %s' ${uploaded ? `--before=${JSON.stringify(uploaded)}` : ''} -6`, { encoding: 'utf8' }).trim();
+    candidates = log ? `\n  commits that predate that upload (candidates to probe, newest first):\n${log.split('\n').map(l => `    ${l}`).join('\n')}` : '';
+  } catch { candidates = '\n  (could not list candidate commits from git)'; }
+  return [
+    `  live version ${id}`,
+    `  uploaded      ${uploaded || 'unknown'}`,
+    `  script etag   ${etag}`,
+    candidates.replace(/^\n/, ''),
+    '',
+    '  TO RECOVER — three steps, in order:',
+    '   1. PROBE the live worker for something that answers DIFFERENTLY on two adjacent candidates, and include a',
+    '      positive control (a route that returns 200) so a 404 means "this route is absent", not "everything 404s".',
+    '      A route added or deleted by one commit is the easiest; a changed status code or response shape also works.',
+    '   2. Narrow to ONE commit: an upper bound (a change that is NOT live) and a lower bound (a change that IS),',
+    '      with nothing between them in `git log`.',
+    '   3. Record it below in UNTAGGED, with the probes and their answers written out:',
+    `        ${etag}: '<short-sha>',`,
+    '',
+    '  Then deploy with `npm run deploy` — never a bare `npx wrangler deploy`, which is what left this version',
+    '  unidentified. The tag it writes is the only thing that makes the NEXT deploy self-describing.',
+  ].filter(l => l !== '').join('\n');
+}
+
 let BASELINE, BASELINE_HOW;
 try { [BASELINE, BASELINE_HOW] = liveBaseline(); }
 catch (e) { console.error(`POLICY BEFORE DEPLOY — BLOCKED: COULD NOT DERIVE THE LIVE COMMIT — ${e.message.split('\n')[0]}`); if (e.message.includes('\n')) console.error(e.message.split('\n').slice(1).join('\n')); process.exit(1); }

@@ -30,6 +30,7 @@ import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword
 import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
+import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
@@ -186,8 +187,10 @@ async function otpRequest(request, env) {
 
   const sent = await sendCode(env, identifier, code, purpose);
   if (!sent.ok) {
-    // Honest failure — never claim we sent something we didn't (Doctrine Art.8).
-    return fail(503, sent.error);
+    // Honest failure — never claim we sent something we didn't (Doctrine Art.8). The REASON travels with it now,
+    // so the app can act on it (offer the password instead of a code that will never come) and so a person is
+    // never told to wait for something waiting cannot deliver.
+    return fail(503, sent.error, sent.reason);
   }
   return ok();
 }
@@ -198,12 +201,15 @@ async function sendCode(env, identifier, code, purpose) {
   if (channelOf(identifier) !== 'email') {
     return { ok: false, error: 'SMS codes are not available yet. Please use an email address.' };
   }
-  if (!env.RESEND_API_KEY) {
-    return { ok: false, error: 'Verification email is not configured yet. Please try again later.' };
-  }
+  // "Please try again later" was a lie for this branch: no key is set, and waiting has never once fixed that.
+  // Measured live on 2026-09-22 — the deployed Worker had only COMP_CODES and JWT_SECRET, so EVERY password reset
+  // and EVERY emailed sign-up code since the app existed returned this 503. Nobody could tell, because the
+  // sentence invited them to wait.
+  if (!env.RESEND_API_KEY) return mailFailure(MAIL_FAIL.notConfigured);
   const subject = purpose === 'reset' ? 'Your Vezvezak password reset code' : 'Your Vezvezak verification code';
+  let res;
   try {
-    const res = await fetch('https://api.resend.com/emails', {
+    res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -213,11 +219,16 @@ async function sendCode(env, identifier, code, purpose) {
         text: `Your Vezvezak code is ${code}\n\nIt expires in 10 minutes. If you didn't request it, ignore this email.`,
       }),
     });
-    if (!res.ok) return { ok: false, error: 'Could not send the code. Please try again later.' };
-    return { ok: true };
   } catch {
-    return { ok: false, error: 'Could not send the code. Please try again later.' };
+    return mailFailure(MAIL_FAIL.unreachable);
   }
+  if (res.ok) return { ok: true };
+  // THE PROVIDER'S ANSWER SURVIVES (Ehsan 2026-09-22). This used to be discarded, which is why an unset key and an
+  // unverified sending domain looked identical to the person locked out AND to us. `name` is Resend's own machine
+  // -readable code and is the only part carried back; its prose is written for a developer, never for a person.
+  let name;
+  try { name = (await res.json())?.name; } catch { name = undefined; }
+  return mailFailure(classifyMailStatus(res.status), { provider: 'resend', status: res.status, name });
 }
 
 async function otpVerify(request, env) {
