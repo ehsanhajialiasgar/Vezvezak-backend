@@ -32,6 +32,7 @@ import { iapValidate } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
 import { codeEmail, SUPPORT_EMAIL } from './mailTemplate.js';
+import { mayUseAccount, verificationState, waitPhrase } from './verification.js';
 import { normalizeConversion, verifyPostbackSecret } from './affiliate.js';
 import { normalizeItem, normalizeVariant, screenCatalogText } from './catalog.js';
 import { merchantMatches } from './verified.js';
@@ -106,11 +107,18 @@ async function signup(request, env) {
     'VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
   ).bind(user.id, user.identifier, user.channel, user.name, hash, salt, iter, user.created_at).run();
 
-  // We issue the session immediately. OTP verification is offered separately
-  // (/auth/otp/request) rather than blocking signup, because blocking on an
-  // undeliverable code would lock every user out until email is configured.
-  const token = await signJwt({ sub: user.id, identifier }, env.JWT_SECRET);
-  return ok({ token, user: publicUser(user), needsOtp: false });
+  // THE ACCOUNT EXISTS AND CANNOT BE USED UNTIL THE ADDRESS IS CONFIRMED (Ehsan 2026-09-22, decided).
+  //
+  // Until today this issued a session immediately and answered needsOtp:false, with the reason written beside
+  // it: blocking on a code that could not be delivered would have locked every new user out while
+  // RESEND_API_KEY did not exist. It exists now. The reason expired, and so did the behaviour.
+  //
+  // NO TOKEN IS RETURNED. A token here would BE the account working, which is exactly what must wait. If the
+  // code cannot be sent, the refusal says why and the row stays: the person can ask again, from the sign-in
+  // screen, without creating a second account.
+  const refused = await issueCode(request, env, identifier, 'signup');
+  if (refused) return refused;
+  return ok({ needsOtp: true, identifier, user: publicUser(user) });
 }
 
 async function login(request, env) {
@@ -136,9 +144,62 @@ async function login(request, env) {
   if (!user) return fail(401, GENERIC);
   if (!(await verifyPassword(String(body.password || ''), user))) return fail(401, GENERIC);
 
+  // AN ACCOUNT THAT NEVER CONFIRMED ITS ADDRESS CANNOT BE SIGNED INTO (Ehsan 2026-09-22). The password was
+  // right, so this is NOT the generic message: telling someone their password is wrong when it is correct
+  // sends them to reset a password that was never the problem. The reason lets the app take them to the code
+  // screen instead of showing a wall.
+  //
+  // Accounts created before verification was asked for are grandfathered — see verification.js. Every one of
+  // the nine rows in production is verified = 0, the founder's included, because nothing could ever set it.
+  if (!mayUseAccount(user)) {
+    return fail(403, 'Confirm your email address to finish setting up this account. We can send you a new code.', 'email_unverified');
+  }
+
   await env.DB.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').bind(nowIso(), user.id).run();
   const token = await signJwt({ sub: user.id, identifier }, env.JWT_SECRET);
   return ok({ token, user: publicUser(user) });
+}
+
+// EVERY CODE THIS SERVER SENDS GOES THROUGH HERE (Ehsan 2026-09-22). Sign-up began sending a code today, and a
+// second sender beside otpRequest would have been a second set of ceilings to keep in step — the guard-on-one-
+// of-two-producers shape that put three catalogue rows where no buyer could see them. The ceilings, the code,
+// the row and the send are one function, and both callers call it.
+//
+// Returns a Response on refusal, or null when a code was issued.
+async function issueCode(request, env, identifier, purpose) {
+  // THREE ceilings, each broader than the last, ALL fail CLOSED. Per-identifier alone was defeated by rotating
+  // the identifier (1.4 trace): a metered Resend email with no real ceiling. If we cannot EVALUATE a ceiling
+  // (DB unreachable), we refuse — missing data never allows. Each trip returns a distinct reason so the client
+  // can tell the user which truth it is (1.13), and now also HOW LONG: rateLimit has always returned
+  // retryAfterMs and nobody read it, so "Please wait an hour" was said whether the wait was 59 minutes or 4.
+  let ceilingRefusal;
+  try {
+    const g = await rateLimit(env, 'otp:global', OTP_GLOBAL_DAILY, 24 * 60 * 60 * 1000);
+    if (!g.allowed) ceilingRefusal = fail(429, `Verification is busy right now. Please try again in ${waitPhrase(g.retryAfterMs)}.`, 'otp_rate_global', g.retryAfterMs);
+    else {
+      const ipk = await ipHash(request, env);
+      const ip = await rateLimit(env, `otpip:${ipk}`, OTP_PER_IP_HOURLY, 60 * 60 * 1000);
+      if (!ip.allowed) ceilingRefusal = fail(429, `Too many codes from this network. Please wait ${waitPhrase(ip.retryAfterMs)}.`, 'otp_rate_ip', ip.retryAfterMs);
+      else {
+        const id = await rateLimit(env, `otp:${identifier}`, 5, 60 * 60 * 1000);
+        if (!id.allowed) ceilingRefusal = fail(429, `Too many codes requested. Please wait ${waitPhrase(id.retryAfterMs)}.`, 'otp_rate_identifier', id.retryAfterMs);
+      }
+    }
+  } catch {
+    return fail(503, 'Verification is temporarily unavailable. Please try again shortly.', 'otp_unavailable');
+  }
+  if (ceilingRefusal) return ceilingRefusal;
+
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
+  await env.DB.prepare(
+    'INSERT INTO otp_codes (id, identifier, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).bind(uid('otp'), identifier, purpose, await sha256(code), Date.now() + OTP_TTL_MS, Date.now()).run();
+
+  const sent = await sendCode(env, identifier, code, purpose);
+  // Honest failure — never claim we sent something we didn't (Doctrine Art.8). The REASON travels with it, so
+  // the app can offer the password instead of a code that will never come.
+  if (!sent.ok) return fail(503, sent.error, sent.reason);
+  return null;
 }
 
 async function otpRequest(request, env) {
@@ -156,43 +217,9 @@ async function otpRequest(request, env) {
   const oq = emailOnly(identifier);
   if (!oq.ok) return fail(400, oq.message, oq.reason);
 
-  // THREE ceilings, each broader than the last, ALL fail CLOSED. Per-identifier alone
-  // was defeated by rotating the identifier (1.4 trace): a metered Resend email with no
-  // real ceiling. If we cannot EVALUATE a ceiling (DB unreachable), we refuse — missing
-  // data never allows, the same rule as the signed-out cap and enforcing(). Each trip
-  // returns a distinct reason so the client can tell the user which truth it is (1.13).
-  let ceilingRefusal;
-  try {
-    // global (widest) → per-IP → per-identifier (narrowest, existing). A rotating
-    // attacker passes the identifier check every time but is caught by IP then global.
-    const g = await rateLimit(env, 'otp:global', OTP_GLOBAL_DAILY, 24 * 60 * 60 * 1000);
-    if (!g.allowed) ceilingRefusal = fail(429, 'Verification is busy right now. Please try again later.', 'otp_rate_global');
-    else {
-      const ipk = await ipHash(request, env);
-      const ip = await rateLimit(env, `otpip:${ipk}`, OTP_PER_IP_HOURLY, 60 * 60 * 1000);
-      if (!ip.allowed) ceilingRefusal = fail(429, 'Too many codes from this network. Please wait an hour.', 'otp_rate_ip');
-      else {
-        const id = await rateLimit(env, `otp:${identifier}`, 5, 60 * 60 * 1000);
-        if (!id.allowed) ceilingRefusal = fail(429, 'Too many codes requested. Please wait an hour.', 'otp_rate_identifier');
-      }
-    }
-  } catch {
-    return fail(503, 'Verification is temporarily unavailable. Please try again shortly.', 'otp_unavailable');
-  }
-  if (ceilingRefusal) return ceilingRefusal;
-
-  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
-  await env.DB.prepare(
-    'INSERT INTO otp_codes (id, identifier, purpose, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).bind(uid('otp'), identifier, purpose, await sha256(code), Date.now() + OTP_TTL_MS, Date.now()).run();
-
-  const sent = await sendCode(env, identifier, code, purpose);
-  if (!sent.ok) {
-    // Honest failure — never claim we sent something we didn't (Doctrine Art.8). The REASON travels with it now,
-    // so the app can act on it (offer the password instead of a code that will never come) and so a person is
-    // never told to wait for something waiting cannot deliver.
-    return fail(503, sent.error, sent.reason);
-  }
+  // "Resend the code" is this same route called again — one ceiling, one path, nothing to keep in step.
+  const refused = await issueCode(request, env, identifier, purpose);
+  if (refused) return refused;
   return ok();
 }
 
@@ -301,8 +328,13 @@ async function passwordReset(request, env) {
   const { hash, salt, iter } = await hashPassword(password);
   // BOTH must land. A password UPDATE that matches nothing would return a fresh token to someone who is being
   // told their password changed, and a reset token that is not marked used stays spendable.
+  // AND THE ADDRESS IS CONFIRMED BY THIS (Ehsan 2026-09-22). Completing a reset means reading a code we sent to
+  // that address, which is the whole of what verification proves. Without this, the person would be handed a
+  // session here and refused at the next sign-in for an address they had just demonstrated they control —
+  // a token issued past a gate that then closes behind it. Counted at the CALL SITE: signup issues no token,
+  // login is gated, otpVerify sets this column, and this is the fourth and last issuer.
   mustAffectAll(await env.DB.batch([
-    env.DB.prepare('UPDATE users SET pw_hash = ?, pw_salt = ?, pw_iter = ? WHERE id = ?')
+    env.DB.prepare('UPDATE users SET pw_hash = ?, pw_salt = ?, pw_iter = ?, verified = 1 WHERE id = ?')
       .bind(hash, salt, iter, user.id),
     env.DB.prepare('UPDATE reset_tokens SET used_at = ? WHERE token = ?').bind(Date.now(), row.token),
   ]), [0, 1], 'resetting the password');

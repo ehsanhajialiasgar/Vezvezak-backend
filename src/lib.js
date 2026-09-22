@@ -19,7 +19,12 @@ export function json(status, body, extra = {}) {
   });
 }
 export const ok = (body = {}) => json(200, { ok: true, ...body });
-export const fail = (status, error, reason) => json(status, { ok: false, error, ...(reason ? { reason } : {}) });
+// `retryAfterMs` added 2026-09-22: a ceiling that refuses must say how long, and rateLimit has always known.
+export const fail = (status, error, reason, retryAfterMs) => json(status, {
+  ok: false, error,
+  ...(reason ? { reason } : {}),
+  ...(Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? { retryAfterMs: Math.round(retryAfterMs) } : {}),
+});
 
 // ── encoding ────────────────────────────────────────────────────────────────
 const enc = new TextEncoder();

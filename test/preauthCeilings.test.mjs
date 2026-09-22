@@ -60,28 +60,60 @@ const isPreAuth = body => !/requireAuth\s*\(/.test(body);
 
 // A ceiling BROADER than per-identifier: a literal (global) rateLimit bucket, or a
 // bucket keyed on IP. A `${identifier}`-style template bucket alone does NOT count.
-function hasBroadCeiling(body) {
+//
+// FOLLOWED THROUGH CALLS, like reachesMetered above (Ehsan 2026-09-22). The ceilings moved out of otpRequest
+// into issueCode() — the one function both otpRequest and signup now call, because sign-up began sending a code
+// and two copies of three ceilings would have been two things to keep in step. This check read the handler's
+// OWN body only, so the move made it report otpRequest as unguarded while the guard was one call away. A gate
+// that follows the call for "does it spend money" must follow it for "is it bounded", or the two answers are
+// about different programs.
+const ceilMemo = {};
+function hasBroadCeiling(name, seen = new Set()) {
+  if (name in ceilMemo) return ceilMemo[name];
+  if (seen.has(name)) return false;
+  seen.add(name);
+  const body = FN[name];
+  if (!body) return false;
   const buckets = [...body.matchAll(/rateLimit\s*\(\s*env\s*,\s*([`'][^`']*[`'])/g)].map(m => m[1]);
-  return buckets.some(b => !b.includes('${') || /ip/i.test(b));
+  if (buckets.some(b => !b.includes('${') || /ip/i.test(b))) return (ceilMemo[name] = true);
+  for (const other of Object.keys(FN)) {
+    if (other !== name && new RegExp(`\\b${other}\\s*\\(`).test(body) && hasBroadCeiling(other, seen)) return (ceilMemo[name] = true);
+  }
+  return (ceilMemo[name] = false);
 }
 
-t('the analysis actually sees the known metered pre-auth route', () => {
+t('the analysis actually sees the known metered pre-auth routes — BOTH of them', () => {
   assert.ok(handlers.length > 0, 'no route handlers found — the dispatch pattern changed; fix the parser');
-  assert.ok(handlers.includes('otpRequest'), 'otpRequest not detected as a route handler');
-  assert.ok(reachesMetered('otpRequest'), 'otpRequest not detected as reaching a metered host');
+  for (const h of ['otpRequest', 'signup']) {
+    assert.ok(handlers.includes(h), `${h} not detected as a route handler`);
+    // signup joined this set on 2026-09-22 by sending a confirmation code. A gate that stopped seeing it would
+    // pass by looking away, which is the failure this line exists to prevent.
+    assert.ok(reachesMetered(h), `${h} not detected as reaching a metered host — it sends email through issueCode`);
+    assert.ok(isPreAuth(FN[h]), `${h} is no longer pre-auth — re-read this gate's scope before trusting it`);
+  }
+});
+
+t('the broad-ceiling check is not trivially true — a function with no ceiling anywhere fails it', () => {
+  // NEGATIVE: without this, "everything has a ceiling" could mean the matcher matches anything.
+  assert.equal(hasBroadCeiling('publicUser'), false, 'a helper that touches no rateLimit must not read as bounded');
+  assert.equal(hasBroadCeiling('issueCode'), true, 'and the chokepoint that holds all three must read as bounded');
 });
 
 t('every pre-auth route reaching a metered third-party host has a ceiling above per-identifier', () => {
-  const offenders = [];
+  const offenders = [], checked = [];
   for (const h of new Set(handlers)) {
     const body = FN[h];
     if (!body || !reachesMetered(h) || !isPreAuth(body)) continue;
-    if (!hasBroadCeiling(body)) offenders.push(h);
+    checked.push(h);
+    if (!hasBroadCeiling(h)) offenders.push(h);
   }
   assert.deepStrictEqual(
     offenders, [],
     `pre-auth metered route(s) gated only by a per-identifier limit (rotation-defeatable — add a global and/or per-IP ceiling): ${offenders.join(', ')}`,
   );
+  // NAME THE SET. A count of zero offenders means nothing until it is said which routes were judged.
+  console.log(`     field of view: ${checked.length} pre-auth metered route(s) judged: ${checked.join(', ')}`);
+  assert.ok(checked.length >= 2, `only ${checked.length} route(s) reached the judgement — the analysis narrowed`);
 });
 
 console.log(`\n  ${pass} passed, ${fail} failed`);

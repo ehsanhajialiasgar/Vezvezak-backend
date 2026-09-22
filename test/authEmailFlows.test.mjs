@@ -68,13 +68,19 @@ const FIRST = 'firstpass2609';
 const SECOND = 'secondpass2609';
 
 // ── 1 · an account exists ────────────────────────────────────────────────────
-await t('an account is created', async () => {
+await t('an account is created, and it is not usable until its address is confirmed', async () => {
   const r = await post('/auth/signup', { identifier: WHO, password: FIRST });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.ok(r.body.token);
+  assert.equal(r.body.needsOtp, true, 'since 2026-09-22 sign-up sends a code and withholds the session');
+  assert.equal(r.body.token, undefined);
+  const locked = await post('/auth/login', { identifier: WHO, password: FIRST });
+  assert.equal(locked.status, 403, JSON.stringify(locked.body));
+  assert.equal(locked.body.reason, 'email_unverified');
 });
 
-await t('and its password works', async () => {
+await t('confirming the address is what makes the password work', async () => {
+  const v = await post('/auth/otp/verify', { identifier: WHO, code: codeFromMail(lastMail()), purpose: 'signup' });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
   const r = await post('/auth/login', { identifier: WHO, password: FIRST });
   assert.equal(r.status, 200, JSON.stringify(r.body));
 });
@@ -150,13 +156,12 @@ await t('SIGN-UP — a verification code is sent, and it is a DIFFERENT email fr
     'verifying the address is the only thing this purpose does that signin does not');
 });
 
-await t('NOTED, NOT FIXED: no app journey asks for a sign-up code today', () => {
-  // /auth/signup always answers needsOtp:false, and SignUpScreen only navigates to the code screen when it is
-  // true — so the pipe below works and nothing walks it. That was deliberate while email did not send at all
-  // (a new account could not be locked out by an unconfigured mailer); email sends as of 2026-09-22, so the
-  // reason has expired and whether to verify addresses at sign-up is a product decision, not a repair.
+await t('and the app now HAS a journey that asks for it — the note this replaced said it did not', () => {
+  // /auth/signup answered needsOtp:false until 2026-09-22, so SignUpScreen's code branch was unreachable and
+  // no sign-up email was ever sent to anyone. The founder reversed that the day email began to send.
   const src = readFileSync(resolve(HERE, '..', 'src', 'index.js'), 'utf8');
-  assert.match(src, /needsOtp: false/, 'if signup starts asking for a code, delete this note and test the journey');
+  assert.doesNotMatch(src, /needsOtp: false/, 'sign-up must not hand back a session again');
+  assert.match(src, /needsOtp: true/);
 });
 
 // ── 4 · ONE-TIME CODE SIGN-IN ────────────────────────────────────────────────
@@ -183,7 +188,7 @@ await t('a code issued for SIGN-IN cannot be spent as a RESET', async () => {
 await t('every message sent in this run carried both parts and no tracking', () => {
   // NAME THE SET, don't score it. These are exactly the sends this file asks for, in order; a count on its own
   // would pass just as happily if two of them had silently stopped going out.
-  const expected = ['password reset', 'verification', 'sign-in', 'sign-in'];
+  const expected = ['verification', 'password reset', 'verification', 'verification', 'sign-in', 'sign-in'];
   assert.equal(inbox.length, expected.length, `sent ${inbox.length} messages, expected ${expected.length}: ${inbox.map(m => m.subject).join(' | ')}`);
   inbox.forEach((m, i) => assert.ok(m.subject.toLowerCase().includes(expected[i]),
     `message ${i + 1} should be the ${expected[i]} one, was "${m.subject}"`));
