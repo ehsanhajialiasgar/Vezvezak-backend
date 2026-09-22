@@ -451,6 +451,13 @@ async function reviewsForSubject(request, env, url) {
 
 // ── merchants ───────────────────────────────────────────────────────────────
 
+// D1 reports a broken UNIQUE index as a message, not a code. Matching the CONSTRAINT rather than the word
+// "UNIQUE" keeps this from swallowing some other table's conflict as "you already have a store".
+export function isDuplicateStoreName(e) {
+  const m = String(e?.cause?.message || e?.message || e);
+  return /UNIQUE constraint failed/i.test(m) && /merchants\.user_id/i.test(m) && /merchants\.store_name/i.test(m);
+}
+
 async function merchantSubmit(request, env) {
   const body = await readJson(request);
   if (!body) return fail(400, 'Invalid request.');
@@ -465,12 +472,48 @@ async function merchantSubmit(request, env) {
   const rl = await rateLimit(env, `merchant:${claims.sub}`, 10, 24 * 60 * 60 * 1000);
   if (!rl.allowed) return fail(429, 'Too many submissions today.');
 
+  const text = (v, max = 200) => { const t = String(v ?? '').trim(); return t ? t.slice(0, max) : null; };
+
+  // EDITING YOUR OWN STORE (Ehsan 2026-09-22). Until today this endpoint only ever INSERTED, and the app's only
+  // "Business info" control opened the same creation wizard — so a merchant who mistyped their address had no way
+  // to correct it. Re-submitting the same name now hits the UNIQUE index added with D2 and the worker threw, which
+  // the app showed as "couldn't be saved on this device. Please try again" — a device blamed for a server rule,
+  // and a retry that could never work. An owned merchantId means UPDATE that row; anything else is a new store.
+  const editId = String(body.merchantId || '').trim();
+  if (editId) {
+    const owned = await env.DB.prepare('SELECT id FROM merchants WHERE id = ? AND user_id = ?').bind(editId, claims.sub).first();
+    if (!owned) return fail(403, 'You do not own that store.');
+    try {
+      mustAffect(await env.DB.prepare(
+        'UPDATE merchants SET store_name = ?, category = ?, biz_type = ?, address = ?, latitude = ?, longitude = ?, ' +
+        'phone = ?, website = ?, notes = ?, services = ?, wholesale = ?, seller_type = ?, offer_type = ?, ' +
+        'sale_channel = ?, showcase = ?, radius_miles = ?, luxury_brand = ?, luxury_cert = ? WHERE id = ? AND user_id = ?',
+      ).bind(
+        storeName,
+        (body.category || '').trim() || null, body.bizType || null, address,
+        Number.isFinite(body.latitude) ? body.latitude : null,
+        Number.isFinite(body.longitude) ? body.longitude : null,
+        (body.phone || '').trim() || null, (body.website || '').trim() || null,
+        (body.notes || '').trim() || null, (body.services || '').trim() || null,
+        body.wholesale ? 1 : 0,
+        text(body.sellerType, 60), text(body.offerType, 20), text(body.saleChannel, 20), text(body.showcase, 500),
+        Number.isFinite(body.radiusMiles) ? Math.max(0, Math.min(500, Math.round(body.radiusMiles))) : null,
+        text(body.luxuryBrand, 120), text(body.luxuryCert, 200),
+        editId, claims.sub,
+      ).run(), 'merchant update');
+    } catch (e) {
+      if (isDuplicateStoreName(e)) return fail(409, 'You already have another store with that name.');
+      throw e;
+    }
+    return ok({ id: editId, status: 'live', updated: true });
+  }
+
   const id = uid('mch');
   // THE EIGHT FIELDS ARE KEPT NOW (Ehsan 2026-09-18). The app had always sent sellerType, offerType,
   // saleChannel, showcase, radiusMiles, commissionAgreed, luxuryBrand and luxuryCert; this INSERT had no
   // columns for them and SQLite says nothing about values you never bind, so a carefully-made choice — and a
   // merchant's consent to a commission — went in the bin on arrival. Each is bounded here, never trusted raw.
-  const text = (v, max = 200) => { const t = String(v ?? '').trim(); return t ? t.slice(0, max) : null; };
+  try {
   await env.DB.prepare(
     'INSERT INTO merchants (id, user_id, store_name, category, biz_type, address, latitude, longitude, ' +
     'phone, website, notes, services, wholesale, seller_type, offer_type, sale_channel, showcase, ' +
@@ -493,6 +536,12 @@ async function merchantSubmit(request, env) {
     text(body.luxuryBrand, 120), text(body.luxuryCert, 200),
     'live', body.submittedAt || nowIso(),   // D1: live on submit — there is no reviewer, see the note below
   ).run();
+  } catch (e) {
+    // D2 added UNIQUE(user_id, store_name). Without this the violation escaped as an unhandled worker exception —
+    // HTTP 500, `error code: 1101`, no JSON — and the app could only guess. Name the rule that was broken.
+    if (isDuplicateStoreName(e)) return fail(409, 'You already have a store with that name. Open Business info to edit it.');
+    throw e;
+  }
   // 'pending' — listing is an introduction awaiting review, never a guarantee.
   // D1 (Ehsan 2026-09-21): this said 'pending', and NOTHING in the backend ever moved a merchant off it — there
   // is no reviewer and no queue. A status that never changes is not a state machine, it is a label that misleads
@@ -873,10 +922,16 @@ async function merchantsMine(request, env) {
   const claims = await requireAuth(request, env);
   if (!claims) return fail(401, 'Sign in to see your stores.');
   const { results } = await env.DB.prepare(
+    // THE WHOLE ROW, NOT A NAME (Ehsan 2026-09-22). This returned the identity fields only, so the two screens
+    // that need the store itself could not have it: "Preview my store page" opened a blank page titled "this
+    // store", and "Business info" opened an EMPTY creation wizard — a merchant could not read back or correct
+    // the address they had just typed. Address, coordinates and contact details are the merchant's own data,
+    // returned to the merchant who owns the row.
     `SELECT id, store_name AS storeName, category, biz_type AS bizType,
             seller_type AS sellerType, offer_type AS offerType, sale_channel AS saleChannel,
             showcase, radius_miles AS radiusMiles, commission_agreed AS commissionAgreed,
-            luxury_brand AS luxuryBrand, luxury_cert AS luxuryCert, status
+            luxury_brand AS luxuryBrand, luxury_cert AS luxuryCert, status,
+            address, latitude, longitude, phone, website, notes, services, wholesale
        FROM merchants WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 50`,
   ).bind(claims.sub).all();
   return ok({ merchants: results || [] });

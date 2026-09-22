@@ -106,12 +106,19 @@ CREATE TABLE IF NOT EXISTS merchants (
   commission_agreed INTEGER,
   luxury_brand      TEXT,
   luxury_cert       TEXT,
+  -- The DEFAULT still reads 'pending' because that is what the LIVE table says: D1 changed the writer and
+  -- backfilled the rows, it did not rebuild the column. Every INSERT binds 'live' explicitly (merchantStatus
+  -- test), so the default is unreachable — it is kept here only so this file and production stay the same file.
   status       TEXT NOT NULL DEFAULT 'pending',  -- pending | live | rejected
   submitted_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_merchants_geo ON merchants(latitude, longitude);
 CREATE INDEX IF NOT EXISTS idx_merchants_status ON merchants(status);
+-- D2 (Ehsan 2026-09-21), applied to production by migrations_merchant_status_and_unique.sql on 2026-09-22.
+-- It lived only in the migration, so a database built from this file did NOT have it and every test ran against
+-- a schema production did not have. One store per name per owner.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_merchants_user_store ON merchants(user_id, store_name);
 
 -- Simple per-identifier/IP rate limiting (abuse + cost control).
 CREATE TABLE IF NOT EXISTS rate_limits (
