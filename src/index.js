@@ -877,11 +877,16 @@ async function catalogBulk(request, env) {
     const norm = normalizeItem(raw || {});
     if (!norm.ok) { skipped++; continue; }
     const it = norm.value;
-    // Bulk uses only the deterministic screen (no per-item AI call for 500 rows):
-    // prohibited → rejected, everything else → pending for batch review. Nothing
-    // auto-goes-live in bulk.
+    // THE SECOND PRODUCER (Ehsan 2026-09-22). This said "everything else → pending for batch review. Nothing
+    // auto-goes-live in bulk" — the doctrine from before 2026-09-18, left behind when the single-item path was
+    // corrected. There is no batch review, and no reviewer: 'pending' here meant a merchant uploaded a
+    // spreadsheet, was told "Uploaded 3 item(s)", and those three were invisible to every buyer for ever.
+    // Proved on production: a real CSV upload through the app's own Files picker produced 3 rows, all 'pending'.
+    // Found by COUNTING what each producer writes — 14 items, 11 live — not by reading the path that was fixed.
+    // Bulk still uses only the deterministic screen (no per-item AI call for 500 rows), which is the one thing
+    // that can refuse a listing on either path.
     const text = `${it.title}\n${it.description || ''}\n${it.brand || ''}`;
-    const status = screenCatalogText(text).prohibited ? 'rejected' : 'pending';
+    const status = screenCatalogText(text).prohibited ? 'rejected' : 'live';
     if (status === 'rejected') rejected++;
     const id = uid('cit');
     await env.DB.prepare(
