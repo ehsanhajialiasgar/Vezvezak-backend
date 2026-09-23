@@ -51,14 +51,37 @@ await t('THE 500: a key that cannot load is now a REASON, not a crash', async ()
   assert.equal(r.reason, 'apple_key_unusable', `a crash instead of a reason: ${JSON.stringify(r)}`);
 });
 
-await t('Apple\'s answers to the key probe are each named', async () => {
-  const reply = status => async () => new Response(status === 200 ? '{}' : '', { status });
-  assert.deepEqual(await appleKeyProbe(CFG, reply(200), 1), { keyLoads: true, status: 200, reason: 'ok' });
-  assert.equal((await appleKeyProbe(CFG, reply(202), 1)).reason, 'ok', '202 Accepted is Apple saying yes');
-  // THE ONE THAT MATTERS: a well-formed token Apple will not take here means the wrong KIND of key.
-  assert.equal((await appleKeyProbe(CFG, reply(401), 1)).reason, 'apple_rejected_key');
-  assert.equal((await appleKeyProbe(CFG, reply(403), 1)).reason, 'apple_http_403');
-  assert.equal((await appleKeyProbe(CFG, reply(500), 1)).reason, 'apple_http_500');
+await t("Apple's OWN error code decides, not the bare status", async () => {
+  const reply = (status, body) => async () => new Response(body === undefined ? '' : JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  });
+  // 4040005 TransactionIdNotFound — the key authenticated, the app resolved, and only the id we invented is
+  // missing. That is the BEST answer a key probe can get, and reporting it as a failure was the bug.
+  let r = await appleKeyProbe(CFG, reply(404, { errorCode: 4040005, errorMessage: 'Transaction id not found.' }), 1);
+  assert.equal(r.reason, 'ok', JSON.stringify(r));
+  assert.equal(r.appleError, 'transaction_id_not_found');
+  assert.equal(r.appleErrorCode, 4040005);
+
+  // 4040010 AppNotFound — the key is fine; the APP is not in that environment, which is exactly what an
+  // unreleased app looks like in production. A different fact, and it must not read as a bad key.
+  r = await appleKeyProbe(CFG, reply(404, { errorCode: 4040010, errorMessage: 'App not found.' }), 1, 'Production');
+  assert.equal(r.reason, 'apple_app_not_in_environment', JSON.stringify(r));
+  assert.equal(r.appleError, 'app_not_found');
+  assert.notEqual(r.reason, 'ok', 'production not knowing an unreleased app is not proof the key works');
+  assert.notEqual(r.reason, 'apple_rejected_key', 'nor is it a rejected key');
+
+  // 401 — a well-formed ES256 JWT Apple will not take here means the wrong KIND of key.
+  assert.equal((await appleKeyProbe(CFG, reply(401, { errorCode: 4010000 }), 1)).reason, 'apple_rejected_key');
+  // A 404 with a code we have never seen is named by its number, never silently treated as success.
+  r = await appleKeyProbe(CFG, reply(404, { errorCode: 4049999 }), 1);
+  assert.equal(r.appleError, 'apple_error_4049999');
+  assert.notEqual(r.reason, 'ok');
+  // A body that is not JSON at all must not throw, and must not become ok.
+  r = await appleKeyProbe(CFG, reply(500), 1);
+  assert.equal(r.reason, 'apple_http_500');
+  assert.equal(r.appleErrorCode, null);
+  // 200 is still 200.
+  assert.equal((await appleKeyProbe(CFG, async () => new Response('{}', { status: 200 }), 1)).reason, 'ok');
   const unreachable = await appleKeyProbe(CFG, async () => { throw new Error('dns'); }, 1);
   assert.equal(unreachable.reason, 'apple_unreachable');
   assert.equal(unreachable.keyLoads, true, 'the key loaded; it was the network that did not');
@@ -75,15 +98,53 @@ await t('the probe reveals the status and nothing else', async () => {
   assert.ok(!JSON.stringify(bad).includes('nonsense'), 'a failure must not echo the value that failed');
 });
 
-await t('it probes SANDBOX, which sends nothing to anybody', async () => {
+await t('it reads a transaction that cannot exist — nobody\'s data, either environment', async () => {
   let url = '';
   await appleKeyProbe(CFG, async u => { url = String(u); return new Response('{}', { status: 200 }); }, 1);
-  assert.match(url, /api\.storekit-sandbox\.itunes\.apple\.com|sandbox/i, `probed ${url} — production would be a live call`);
-  assert.match(url, /\/inApps\/v1\/notifications\/test$/, "Apple's documented harmless probe");
+  assert.match(url, /api\.storekit-sandbox\.itunes\.apple\.com/, `default must be sandbox; probed ${url}`);
+  assert.match(url, /\/inApps\/v1\/transactions\/0{16}$/, 'an id of all zeroes cannot belong to a purchase');
+  await appleKeyProbe(CFG, async u => { url = String(u); return new Response('{}', { status: 200 }); }, 1, 'Production');
+  assert.match(url, /api\.storekit\.itunes\.apple\.com/, `production must be asked too; probed ${url}`);
 });
 
 await t('decodeJwsPayload still refuses anything malformed', () => {
   for (const bad of [null, 'x', 'a.b', 'a..c']) assert.throws(() => decodeJwsPayload(bad));
+});
+
+await t("real validation follows Apple's documented order: production, then sandbox", async () => {
+  // Each rig gets its OWN counter. Sharing one made the second call in the next rig read past the end of its
+  // sequence and throw, which arrived as 'apple_unreachable' — a test failing for its own plumbing.
+  let calls = [];
+  const reply = seq => { let i = 0; return async (u) => {
+    calls.push(String(u));
+    const r = seq[i++];
+    if (!r) throw new Error('sequence exhausted');
+    return new Response(r.body === undefined ? '' : JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } });
+  }; };
+  // A SANDBOX PURCHASE: production does not know the app, sandbox does. Without the fall-back, every sandbox
+  // tester's purchase is refused — which is every purchase before the app ships.
+  const seq = [
+    { status: 404, body: { errorCode: 4040010, errorMessage: 'App not found.' } },
+    { status: 200, body: { signedTransactionInfo: 'x.eyJwcm9kdWN0SWQiOiJ2ZXpfcHJvX21vbnRobHkifQ.y' } },
+  ];
+  const r = await fetchTransaction('2000000000000001', CFG, reply(seq), 1);
+  assert.equal(calls.length, 2, `expected production then sandbox, got ${calls.length} call(s)`);
+  assert.match(calls[0], /api\.storekit\.itunes\.apple\.com/, 'production must be asked first');
+  assert.match(calls[1], /storekit-sandbox/, 'and sandbox second');
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.environment, 'Sandbox');
+
+  // NEGATIVE: a 404 from production carrying a code that is NOT one of the documented two must not silently
+  // fall through to sandbox — it is a different failure and is named.
+  calls = [];
+  const other = await fetchTransaction('2000000000000001', CFG, reply([{ status: 404, body: { errorCode: 4040099 } }]), 1);
+  assert.equal(other.ok, false);
+  assert.equal(other.reason, 'apple_error_4040099', JSON.stringify(other));
+
+  // And a non-404 failure carries Apple's own code in its reason.
+  calls = [];
+  const bad = await fetchTransaction('2000000000000001', CFG, reply([{ status: 500, body: { errorCode: 5000000 } }]), 1);
+  assert.match(String(bad.reason), /apple_500_/, JSON.stringify(bad));
 });
 
 console.log(`\nVERDICT: ${pass} passed, ${fail} failed`);

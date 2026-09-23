@@ -637,8 +637,16 @@ async function iapDiagnose(request, env) {
       .filter(k => !(typeof env[k] === 'string' && env[k].trim()));
     return json(200, { ok: false, configured: false, missing, reason: 'iap_not_configured' });
   }
-  const probe = await appleKeyProbe(cfg);
-  return json(200, { ok: probe.reason === 'ok', configured: true, ...probe });
+  // BOTH ENVIRONMENTS, because they answer different questions (2026-09-23). Sandbox is where a sandbox tester
+  // buys; production is where a released app's customers are. An app that has never shipped is not in
+  // production, so a 404 there is expected and says nothing bad about the key — reporting it as a failure
+  // would be reporting Apple's correct answer as our fault.
+  const sandbox = await appleKeyProbe(cfg, fetch, undefined, 'Sandbox');
+  const production = await appleKeyProbe(cfg, fetch, undefined, 'Production');
+  // The KEY is good if EITHER environment got far enough to answer about a transaction. A key Apple refuses is
+  // refused in both.
+  const ok = sandbox.reason === 'ok' || production.reason === 'ok';
+  return json(200, { ok, configured: true, sandbox, production });
 }
 
 // ── referrals ───────────────────────────────────────────────────────────────

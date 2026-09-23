@@ -105,10 +105,19 @@ export async function fetchTransaction(transactionId, cfg, fetchImpl = fetch, no
       return { ok: false, reason: 'apple_unreachable' };
     }
     if (res.status === 404) {
-      if (env === 'Production') continue;
-      return { ok: false, reason: 'apple_not_found' };   // 404 in BOTH environments: Apple has no such transaction
+      // APPLE'S DOCUMENTED ORDER, BY CODE (Ehsan 2026-09-23). Production is asked first; a 404 there is the
+      // documented signal to try Sandbox — an app that has not shipped is not in production at all, and a
+      // sandbox tester's purchase never will be. The code is read so the fall-back happens for the two reasons
+      // Apple documents and not for a 404 that means something else.
+      const { code, named } = await readAppleError(res);
+      if (env === 'Production' && (named === 'app_not_found' || named === 'transaction_id_not_found' || code === null)) continue;
+      if (env === 'Production') return { ok: false, reason: named || 'apple_http_404' };
+      return { ok: false, reason: named === 'app_not_found' ? 'apple_app_not_in_environment' : 'apple_not_found' };
     }
-    if (res.status !== 200) return { ok: false, reason: `apple_http_${res.status}` };
+    if (res.status !== 200) {
+      const { named } = await readAppleError(res);
+      return { ok: false, reason: named ? `apple_${res.status}_${named}` : `apple_http_${res.status}` };
+    }
     let body;
     try { body = await res.json(); } catch { return { ok: false, reason: 'apple_body_not_json' }; }
     if (!body || typeof body.signedTransactionInfo !== 'string') return { ok: false, reason: 'apple_no_signed_transaction' };
@@ -173,6 +182,29 @@ export async function iapValidate(request, env, fetchImpl = fetch) {
   return json(200, { ok: true, plan: verdict.plan, expiresAt: verdict.expiresAt, environment: fetched.environment });
 }
 
+// APPLE'S OWN ERROR CODES, NAMED (Ehsan 2026-09-23).
+//
+// The App Store Server API answers a failure with {errorCode, errorMessage}. The STATUS alone cannot tell these
+// apart, and they mean opposite things about the key:
+//   4040010 AppNotFound           - authenticated fine; this app is not in the environment we asked
+//   4040005 TransactionIdNotFound - authenticated fine, app resolved; only the transaction is missing
+// The second is the best possible answer to "is this key good": everything worked except the thing we made up.
+// Matched as NUMBERS, because the message beside them is prose and may be reworded.
+export const APPLE_ERROR = {
+  4040010: 'app_not_found',
+  4040001: 'app_not_found',
+  4040005: 'transaction_id_not_found',
+  4010000: 'unauthenticated',
+};
+
+// Pull Apple's code out of a body that may or may not be JSON, without ever throwing.
+export async function readAppleError(res) {
+  let body = null;
+  try { body = await res.json(); } catch { body = null; }
+  const code = body && typeof body.errorCode === 'number' ? body.errorCode : null;
+  return { code, named: code !== null ? (APPLE_ERROR[code] || 'apple_error_' + code) : null };
+}
+
 // IS THIS KEY THE RIGHT KEY? — the question a 401 cannot answer on its own (Ehsan 2026-09-22).
 //
 // The App Store Server API and the App Store Connect API take DIFFERENT keys, and both are generated on the
@@ -182,24 +214,29 @@ export async function iapValidate(request, env, fetchImpl = fetch) {
 // to anybody and only reports whether the caller is authorised.
 //
 // It returns a STATUS and a reason. Never the key, never the token, never any part of either.
-export async function appleKeyProbe(cfg, fetchImpl = fetch, nowSec) {
+export async function appleKeyProbe(cfg, fetchImpl = fetch, nowSec, environment = 'Sandbox') {
   let token;
   try { token = await signAppleJwt(cfg, nowSec); }
   catch (e) { return { keyLoads: false, reason: 'apple_key_unusable', detail: String(e?.name || 'error') }; }
+  // A TRANSACTION LOOKUP IS A BETTER KEY PROBE THAN A TEST NOTIFICATION (2026-09-23). notifications/test
+  // depends on a server-notification URL being configured in App Store Connect, so its 404 confounds "the key
+  // is wrong" with "you have not set a webhook". Reading a transaction that cannot exist separates every case
+  // in ONE call and reads nothing belonging to anybody.
+  const probeId = '0'.repeat(16);   // syntactically valid, cannot belong to a real purchase
+  let res;
   try {
-    const res = await fetchImpl(`${APPLE_HOSTS.Sandbox}/inApps/v1/notifications/test`, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    res = await fetchImpl(`${APPLE_HOSTS[environment]}/inApps/v1/transactions/${probeId}`, {
+      headers: { Authorization: `Bearer ${token}` },
     });
-    return {
-      keyLoads: true,
-      status: res.status,
-      // 200/202 → the key is accepted by the SERVER API. 401 → it loads and signs, but Apple will not take it
-      // here, which for a well-formed ES256 JWT means the key is not an In-App Purchase key.
-      reason: res.status === 200 || res.status === 202 ? 'ok'
-        : res.status === 401 ? 'apple_rejected_key'
-        : `apple_http_${res.status}`,
-    };
   } catch {
-    return { keyLoads: true, reason: 'apple_unreachable' };
+    return { keyLoads: true, environment, reason: 'apple_unreachable' };
   }
+  if (res.status === 200) return { keyLoads: true, environment, status: 200, reason: 'ok' };
+  const { code, named } = await readAppleError(res);
+  const base = { keyLoads: true, environment, status: res.status, appleErrorCode: code, appleError: named };
+  // THE KEY IS GOOD when Apple got far enough to tell us the transaction is not there.
+  if (named === 'transaction_id_not_found') return { ...base, reason: 'ok' };
+  if (res.status === 401) return { ...base, reason: 'apple_rejected_key' };
+  if (named === 'app_not_found') return { ...base, reason: 'apple_app_not_in_environment' };
+  return { ...base, reason: 'apple_http_' + res.status };
 }
