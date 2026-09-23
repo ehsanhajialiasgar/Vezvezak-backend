@@ -95,6 +95,9 @@ export async function fetchTransaction(transactionId, cfg, fetchImpl = fetch, no
   let token;
   try { token = await signAppleJwt(cfg, nowSec); }
   catch { return { ok: false, reason: 'apple_key_unusable' }; }
+  // A refusal in Production that Sandbox may still answer. Held, not returned, so that if Sandbox refuses too
+  // the caller is told what BOTH environments said rather than only the last one.
+  let heldProduction = null;
   for (const env of ['Production', 'Sandbox']) {
     let res;
     try {
@@ -110,13 +113,27 @@ export async function fetchTransaction(transactionId, cfg, fetchImpl = fetch, no
       // sandbox tester's purchase never will be. The code is read so the fall-back happens for the two reasons
       // Apple documents and not for a 404 that means something else.
       const { code, named } = await readAppleError(res);
-      if (env === 'Production' && (named === 'app_not_found' || named === 'transaction_id_not_found' || code === null)) continue;
+      if (env === 'Production' && (named === 'app_not_found' || named === 'transaction_id_not_found' || code === null)) {
+        heldProduction = named ? `apple_404_${named}` : 'apple_http_404';
+        continue;
+      }
       if (env === 'Production') return { ok: false, reason: named || 'apple_http_404' };
       return { ok: false, reason: named === 'app_not_found' ? 'apple_app_not_in_environment' : 'apple_not_found' };
     }
     if (res.status !== 200) {
       const { named } = await readAppleError(res);
-      return { ok: false, reason: named ? `apple_${res.status}_${named}` : `apple_http_${res.status}` };
+      const reason = named ? `apple_${res.status}_${named}` : `apple_http_${res.status}`;
+      // PRODUCTION ANSWERS 401 FOR AN APP THAT HAS NEVER SHIPPED (Ehsan 2026-09-23, measured). The same key,
+      // the same JWT, the same second: Sandbox authenticated and answered about the transaction, Production
+      // returned a bodiless 401. Production has no record of an app that is not on the App Store, so it has
+      // nothing to authorise the token AGAINST and rejects the caller rather than reporting a missing app.
+      // Falling back only on 4040010 would therefore have failed EVERY pre-release purchase — the sandbox
+      // testers' purchases are the only purchases that exist before launch. So a Production 401 falls through
+      // to Sandbox exactly as a Production 404 does. It stays correct after launch: a real production
+      // transaction gets a 200 in Production and never reaches this line.
+      if (env === 'Production' && res.status === 401) { heldProduction = reason; continue; }
+      if (env === 'Sandbox' && heldProduction) return { ok: false, reason: `${reason}_after_${heldProduction}` };
+      return { ok: false, reason };
     }
     let body;
     try { body = await res.json(); } catch { return { ok: false, reason: 'apple_body_not_json' }; }
@@ -195,7 +212,16 @@ export const APPLE_ERROR = {
   4040001: 'app_not_found',
   4040005: 'transaction_id_not_found',
   4010000: 'unauthenticated',
+  // 4000006 InvalidTransactionId — MEASURED against Apple 2026-09-23 with a good key: sixteen zeros is not a
+  // well-formed transaction id, and Apple says so with a 400. Saying so REQUIRES having authenticated us and
+  // resolved the app first; an unauthenticated caller never gets this far, it gets a bodiless 401. So this code
+  // is a PASS for the only question the probe asks, and PROBE_AUTHENTICATED below treats it as one.
+  4000006: 'invalid_transaction_id',
 };
+
+// The Apple answers that can only be produced AFTER our key was accepted. Each one reports a fact about the
+// thing we asked for, which Apple cannot know without first knowing who is asking.
+export const PROBE_AUTHENTICATED = new Set(['transaction_id_not_found', 'invalid_transaction_id']);
 
 // Pull Apple's code out of a body that may or may not be JSON, without ever throwing.
 export async function readAppleError(res) {
@@ -203,6 +229,42 @@ export async function readAppleError(res) {
   try { body = await res.json(); } catch { body = null; }
   const code = body && typeof body.errorCode === 'number' ? body.errorCode : null;
   return { code, named: code !== null ? (APPLE_ERROR[code] || 'apple_error_' + code) : null };
+}
+
+// WHICH INPUT IS DIFFERENT? — a comparison needs two sides (Ehsan 2026-09-23).
+//
+// The isolation script on Ehsan's Mac signed the same claims, with the same algorithm, for the same probe id,
+// in the same minute, and Sandbox ANSWERED it (400 InvalidTransactionId — authenticated). The Worker, asking
+// the same question, gets a bodiless 401. Identical code cannot produce both, so an INPUT differs — and a 401
+// is silent about which one. Every candidate is a secret, so the difference has to be shown without showing
+// any of them.
+//
+// A fingerprint does that. Each value is hashed and only twelve hex characters come back, which is enough to
+// say EQUAL or DIFFERENT and not enough to recover a 36-character issuer id or a private key. The public key
+// is derived from the stored private key and fingerprinted from its x/y coordinates: those coordinates are
+// public by definition — Apple has them — and they identify WHICH key is stored without exposing it.
+//
+// The rule this obeys: do not ask for the secret. It is never asked for, never printed and never returned.
+async function fp(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 12);
+}
+
+export async function credentialFingerprints(cfg) {
+  const out = {
+    issuerIdLen: cfg.issuerId.length, issuerIdFp: await fp(cfg.issuerId),
+    keyIdLen: cfg.keyId.length, keyIdFp: await fp(cfg.keyId),
+    bundleId: cfg.bundleId,      // not a secret: it ships inside the app binary
+    publicKeyFp: null,
+  };
+  try {
+    const pem = cfg.privateKey.replace(/\\n/g, '').replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+    const der = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey('pkcs8', der, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+    const jwk = await crypto.subtle.exportKey('jwk', key);
+    out.publicKeyFp = await fp(`${jwk.x}.${jwk.y}`);   // the PUBLIC point only — d is never read
+  } catch { out.publicKeyFp = 'unreadable'; }
+  return out;
 }
 
 // IS THIS KEY THE RIGHT KEY? — the question a 401 cannot answer on its own (Ehsan 2026-09-22).
@@ -234,8 +296,8 @@ export async function appleKeyProbe(cfg, fetchImpl = fetch, nowSec, environment 
   if (res.status === 200) return { keyLoads: true, environment, status: 200, reason: 'ok' };
   const { code, named } = await readAppleError(res);
   const base = { keyLoads: true, environment, status: res.status, appleErrorCode: code, appleError: named };
-  // THE KEY IS GOOD when Apple got far enough to tell us the transaction is not there.
-  if (named === 'transaction_id_not_found') return { ...base, reason: 'ok' };
+  // THE KEY IS GOOD when Apple got far enough to say something about the transaction itself.
+  if (PROBE_AUTHENTICATED.has(named)) return { ...base, reason: 'ok' };
   if (res.status === 401) return { ...base, reason: 'apple_rejected_key' };
   if (named === 'app_not_found') return { ...base, reason: 'apple_app_not_in_environment' };
   return { ...base, reason: 'apple_http_' + res.status };

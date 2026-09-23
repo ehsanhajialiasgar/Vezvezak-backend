@@ -114,7 +114,10 @@ await t('Production 404 → falls back to Sandbox (Apple’s documented order)',
   assert.equal(r.ok, true); assert.equal(r.environment, 'Sandbox');
 });
 for (const [label, impl, reason] of [
-  ['Apple 401 (bad key)', async () => res(401, {}), 'apple_http_401'],
+  // A 401 in production ALONE is no longer a refusal — it is how Apple answers for an app that has never
+  // shipped, so sandbox is asked next (appleKeyProbe.test.mjs proves the fall-back happens). What must still
+  // fail closed is a 401 in BOTH, and the reason now names both rather than only the last one.
+  ['Apple 401 in BOTH environments (bad key)', async () => res(401, {}), 'apple_http_401_after_apple_http_401'],
   ['Apple 500', async () => res(500, {}), 'apple_http_500'],
   ['network failure', async () => { throw new Error('down'); }, 'apple_unreachable'],
   ['200 with no signedTransactionInfo', async () => res(200, {}), 'apple_no_signed_transaction'],

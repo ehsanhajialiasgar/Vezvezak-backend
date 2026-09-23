@@ -28,7 +28,7 @@
 
 import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly, mustAffect, mustAffectAll } from './lib.js';
 import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
-import { iapValidate, appleConfig, appleKeyProbe } from './iap.js';
+import { iapValidate, appleConfig, appleKeyProbe, credentialFingerprints } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
 import { codeEmail, SUPPORT_EMAIL } from './mailTemplate.js';
@@ -646,7 +646,11 @@ async function iapDiagnose(request, env) {
   // The KEY is good if EITHER environment got far enough to answer about a transaction. A key Apple refuses is
   // refused in both.
   const ok = sandbox.reason === 'ok' || production.reason === 'ok';
-  return json(200, { ok, configured: true, sandbox, production });
+  // WHEN NEITHER ENVIRONMENT AUTHENTICATED, say which input is not the one we think it is. Fingerprints only,
+  // twelve hex characters each, compared against the same hash taken of the files on the Mac. Withheld when
+  // the key works, because then there is nothing to tell apart.
+  const fingerprints = ok ? undefined : await credentialFingerprints(cfg);
+  return json(200, { ok, configured: true, sandbox, production, ...(fingerprints ? { fingerprints } : {}) });
 }
 
 // ── referrals ───────────────────────────────────────────────────────────────

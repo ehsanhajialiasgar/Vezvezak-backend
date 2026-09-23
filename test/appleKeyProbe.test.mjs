@@ -10,7 +10,7 @@
 // looks like a wrong secret when the secret is fine and simply of the wrong kind.
 // Run: node test/appleKeyProbe.test.mjs
 import assert from 'node:assert/strict';
-import { signAppleJwt, fetchTransaction, appleKeyProbe, decodeJwsPayload } from '../src/iap.js';
+import { signAppleJwt, fetchTransaction, appleKeyProbe, decodeJwsPayload, credentialFingerprints } from '../src/iap.js';
 
 let pass = 0, fail = 0;
 const t = async (n, fn) => { try { await fn(); console.log('  ✅', n); pass++; } catch (e) { console.log('  ❌', n, '\n     ', e.message); fail++; } };
@@ -145,6 +145,81 @@ await t("real validation follows Apple's documented order: production, then sand
   calls = [];
   const bad = await fetchTransaction('2000000000000001', CFG, reply([{ status: 500, body: { errorCode: 5000000 } }]), 1);
   assert.match(String(bad.reason), /apple_500_/, JSON.stringify(bad));
+});
+
+// ── WHAT APPLE ACTUALLY ANSWERED (measured 2026-09-23, real key, real hosts) ──────────────────────────────
+// Sandbox   HTTP 400 {"errorCode":4000006,"errorMessage":"Invalid transaction id."}
+// Production HTTP 401 (no body)
+// Both facts are now behaviour, not prose.
+await t('a 400 InvalidTransactionId is a PASS — Apple cannot judge an id without first accepting the key', async () => {
+  const reply = (status, body) => async () => new Response(body === undefined ? '' : JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  });
+  const r = await appleKeyProbe(CFG, reply(400, { errorCode: 4000006, errorMessage: 'Invalid transaction id.' }), 1, 'Sandbox');
+  assert.equal(r.reason, 'ok', JSON.stringify(r));
+  assert.equal(r.appleError, 'invalid_transaction_id');
+  assert.equal(r.appleErrorCode, 4000006);
+
+  // NEGATIVE: a bodiless 401 — what Production sends — is still a refusal and must never read as ok.
+  const no = await appleKeyProbe(CFG, reply(401), 1, 'Production');
+  assert.equal(no.reason, 'apple_rejected_key', JSON.stringify(no));
+  assert.equal(no.appleErrorCode, null);
+
+  // NEGATIVE: a 400 that is NOT 4000006 says nothing about the key and must not pass.
+  const other = await appleKeyProbe(CFG, reply(400, { errorCode: 4000029 }), 1, 'Sandbox');
+  assert.notEqual(other.reason, 'ok', JSON.stringify(other));
+});
+
+await t('a Production 401 falls back to Sandbox — otherwise EVERY pre-release purchase fails validation', async () => {
+  const calls = [];
+  const seq = replies => { let i = 0; return async u => { calls.push(String(u)); const r = replies[i++]; return new Response(r.body === undefined ? '' : JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } }); }; };
+
+  // Production 401 (app never shipped) → Sandbox 200 with a real sandbox purchase.
+  const signed = `${Buffer.from('{"alg":"ES256"}').toString('base64url')}.${Buffer.from(JSON.stringify({ bundleId: 'com.ehsan.vezvezak', productId: 'vez_pro_monthly' })).toString('base64url')}.x`;
+  const ok = await fetchTransaction('2000000000000001', CFG,
+    seq([{ status: 401 }, { status: 200, body: { signedTransactionInfo: signed } }]), 1);
+  assert.equal(calls.length, 2, 'the sandbox call must actually happen');
+  assert.match(calls[0], /api\.storekit\.itunes\.apple\.com/);
+  assert.match(calls[1], /storekit-sandbox/);
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(ok.environment, 'Sandbox');
+
+  // NEGATIVE: when Sandbox refuses too, the reason names BOTH environments — a fallback that hides what
+  // production said would turn two failures into one misleading sentence.
+  const both = await fetchTransaction('2000000000000001', CFG, seq([{ status: 401 }, { status: 401 }]), 1);
+  assert.equal(both.ok, false);
+  assert.match(String(both.reason), /after_apple_http_401/, JSON.stringify(both));
+
+  // NEGATIVE: a SANDBOX 401 on its own is not a fallback case — there is nowhere left to go, and it must not
+  // be reported as if production had also been asked.
+  const solo = await appleKeyProbe(CFG, async () => new Response('', { status: 401 }), 1, 'Sandbox');
+  assert.equal(solo.reason, 'apple_rejected_key');
+});
+
+await t('the fingerprints tell inputs apart and expose none of them', async () => {
+  const f = await credentialFingerprints(CFG);
+  assert.equal(f.issuerIdLen, CFG.issuerId.length);
+  assert.equal(f.keyIdFp.length, 12);
+  assert.equal(f.publicKeyFp.length, 12);
+  assert.notEqual(f.publicKeyFp, 'unreadable');
+
+  // A DIFFERENT key must give a different fingerprint — otherwise the comparison proves nothing.
+  const kp2 = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const d2 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp2.privateKey));
+  const pem2 = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...d2)).match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----\n`;
+  const g = await credentialFingerprints({ ...CFG, privateKey: pem2, issuerId: 'other-issuer', keyId: 'OTHERKEY' });
+  assert.notEqual(g.publicKeyFp, f.publicKeyFp, 'two different keys must not fingerprint alike');
+  assert.notEqual(g.issuerIdFp, f.issuerIdFp);
+
+  // The SAME key must fingerprint the same however it was pasted — otherwise a shape difference reads as a
+  // wrong key. Literal backslash-n is the shape a shell paste produces.
+  const same = await credentialFingerprints({ ...CFG, privateKey: CFG.privateKey.replace(/\n/g, '\\n') });
+  assert.equal(same.publicKeyFp, f.publicKeyFp, 'the same key pasted differently is still the same key');
+
+  // NOTHING SECRET COMES BACK: no serialization of the result may contain the key or the issuer id.
+  const dumped = JSON.stringify(f);
+  assert.ok(!dumped.includes(CFG.issuerId), 'the issuer id must never appear');
+  assert.ok(!dumped.includes('PRIVATE KEY') && !dumped.includes(CFG.privateKey.slice(40, 80)), 'no part of the key may appear');
 });
 
 console.log(`\nVERDICT: ${pass} passed, ${fail} failed`);
