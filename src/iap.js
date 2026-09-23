@@ -250,8 +250,26 @@ async function fp(text) {
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 12);
 }
 
+// The SHAPE of each credential, which is knowable without knowing the value. An Issuer ID is a UUID and a Key
+// ID is a short alphanumeric run; a value that is neither cannot be right, and saying so beats a bodiless 401.
+// MEASURED 2026-09-23: the stored issuer was 89 characters — a multi-line clipboard flattened by `tr -d
+// '[:space:]'` into one string — while the key and key id were exactly right. Nothing looked at the shape, so
+// three correct inputs and one impossible one produced the same silent 401 as four wrong ones would.
+export const ISSUER_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const KEY_ID_SHAPE = /^[A-Z0-9]{8,12}$/;
+
+export function credentialShape(cfg) {
+  const problems = [];
+  if (!ISSUER_ID_SHAPE.test(cfg.issuerId)) problems.push('issuer_id_is_not_a_uuid');
+  if (!KEY_ID_SHAPE.test(cfg.keyId)) problems.push('key_id_is_not_a_key_id');
+  if (!/BEGIN PRIVATE KEY|^[A-Za-z0-9+/=\s\\n-]+$/.test(cfg.privateKey)) problems.push('private_key_is_not_pem');
+  if (!/^[a-z0-9.-]+$/i.test(cfg.bundleId)) problems.push('bundle_id_is_not_a_bundle_id');
+  return problems;
+}
+
 export async function credentialFingerprints(cfg) {
   const out = {
+    problems: credentialShape(cfg),
     issuerIdLen: cfg.issuerId.length, issuerIdFp: await fp(cfg.issuerId),
     keyIdLen: cfg.keyId.length, keyIdFp: await fp(cfg.keyId),
     bundleId: cfg.bundleId,      // not a secret: it ships inside the app binary

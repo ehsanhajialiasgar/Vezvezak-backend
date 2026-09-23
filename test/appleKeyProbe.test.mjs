@@ -10,7 +10,7 @@
 // looks like a wrong secret when the secret is fine and simply of the wrong kind.
 // Run: node test/appleKeyProbe.test.mjs
 import assert from 'node:assert/strict';
-import { signAppleJwt, fetchTransaction, appleKeyProbe, decodeJwsPayload, credentialFingerprints } from '../src/iap.js';
+import { signAppleJwt, fetchTransaction, appleKeyProbe, decodeJwsPayload, credentialFingerprints, credentialShape } from '../src/iap.js';
 
 let pass = 0, fail = 0;
 const t = async (n, fn) => { try { await fn(); console.log('  ✅', n); pass++; } catch (e) { console.log('  ❌', n, '\n     ', e.message); fail++; } };
@@ -220,6 +220,24 @@ await t('the fingerprints tell inputs apart and expose none of them', async () =
   const dumped = JSON.stringify(f);
   assert.ok(!dumped.includes(CFG.issuerId), 'the issuer id must never appear');
   assert.ok(!dumped.includes('PRIVATE KEY') && !dumped.includes(CFG.privateKey.slice(40, 80)), 'no part of the key may appear');
+});
+
+await t('an impossible credential is NAMED, not left to Apple to answer with a bodiless 401', async () => {
+  const real = { ...CFG, issuerId: '69a6de70-1234-47e3-e053-5b8c7c11a4d1' };
+  assert.deepEqual(credentialShape(real), [], 'a well-formed set has no problems');
+
+  // THE ONE THAT HAPPENED: a multi-line clipboard flattened into 89 characters.
+  const flattened = { ...real, issuerId: 'IssuerID69a6de70-1234-47e3-e053-5b8c7c11a4d1KeyIDNX8VRBSJ3MInAppPurchaseActive20260923xxx' };
+  assert.equal(flattened.issuerId.length, 89, 'the same length the live worker reported');
+  assert.deepEqual(credentialShape(flattened), ['issuer_id_is_not_a_uuid']);
+  assert.deepEqual((await credentialFingerprints(flattened)).problems, ['issuer_id_is_not_a_uuid']);
+
+  // NEGATIVE: a UUID that merely has whitespace around it is still not usable, and must be caught too.
+  assert.deepEqual(credentialShape({ ...real, issuerId: ` ${real.issuerId}\n` }), ['issuer_id_is_not_a_uuid']);
+  // NEGATIVE: the shape check must not pass a key id that is really a whole sentence.
+  assert.deepEqual(credentialShape({ ...real, keyId: 'the key id is NX8VRBSJ3M' }), ['key_id_is_not_a_key_id']);
+  // NEGATIVE: and it must NOT invent a problem for the values that are actually correct.
+  assert.deepEqual(credentialShape({ ...real, keyId: 'NX8VRBSJ3M' }), []);
 });
 
 console.log(`\nVERDICT: ${pass} passed, ${fail} failed`);
