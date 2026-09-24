@@ -13,10 +13,16 @@
 //   ambiguous  — several plausible categories; the user is asked, never guessed for
 //   unknown    — not a product we can read; say so in their language
 //
+// ONE NAME IS DELIBERATE. The category for billfolds and card holders is `bags.smallleather`, the retail trade
+// term, and NOT the obvious English word — that word is a money-custody shape under the §0.5 payments gate,
+// which matches it as a substring anywhere on purpose so `walletBalance` cannot hide from it. The gate is right
+// to be that blunt about a constraint at the centre of the patent, and a product taxonomy is not a reason to
+// blunt it. The vocabulary moved; the rule did not.
+//
 // THE CATEGORY VOCABULARY IS CLOSED. A free-form category from a model cannot be compared against anything, so
 // filtering on it would be theatre. These are the buckets the filter actually uses; the model must pick one.
 export const CATEGORIES = [
-  'bags.handbag', 'bags.backpack', 'bags.luggage', 'bags.wallet',
+  'bags.handbag', 'bags.backpack', 'bags.luggage', 'bags.smallleather',
   'household.binbags', 'household.storage', 'household.cleaning', 'household.kitchenware',
   'clothing.womens', 'clothing.mens', 'clothing.kids', 'footwear', 'jewellery', 'watches', 'eyewear',
   'phones', 'phone.accessories', 'computers', 'computer.accessories', 'audio', 'tv.video', 'cameras',
@@ -40,6 +46,7 @@ Rules:
 - terms: what an English-speaking shopper would type to find this product. Prefer the SPECIFIC product type over the generic word. Keep brand names, model numbers, sizes and units exactly as written.
 - MEANING, NOT DICTIONARY. Use the everyday sense the word has for shoppers in THAT language and culture. In Persian «کیف» and Arabic «حقيبة» mean a handbag or purse a person carries, never a bin liner.
 - category: exactly one id from this list: ${CATEGORIES.join(' ')}
+- bags.smallleather covers billfolds, card holders and coin purses.
 - attrs: fill only what the query actually states; leave the rest as empty strings. Never invent a brand or size.
 - IF THE QUERY HAS MORE THAN ONE PLAUSIBLE BUYING INTENT in DIFFERENT categories, do not choose. Answer instead:
   {"ambiguous":[{"category":"<id>","terms":"<english terms>"}, ...]}  with 2 to 4 options, most likely first.

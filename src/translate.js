@@ -25,22 +25,6 @@ import { sha256 } from './lib.js';
 // turned abstentions into wrong products (llama 5→13, scout 3→7).
 export const INTENT_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
 export const UNKNOWN = '[[UNKNOWN]]';
-export const INTENT_PROMPT = `You are the query-understanding step of a shopping search engine used by people all over the world.
-The text you receive was typed into a shop's search box. It is almost always the name of a product someone wants to buy, usually one to five words, written in whatever language the person thinks in — any of the world's languages and scripts, including less widely spoken ones.
-Your job: work out which product they want, and output the search terms an English-language online store needs to find that product.
-How to decide:
-- First identify the language from the words themselves (not from the script alone — several languages share a script and the same spelling can mean different things). Then identify the product in that language.
-- A single everyday noun is almost always the product itself: output its plain English name.
-- Keep brand names, model names, model numbers, sizes and units exactly as written.
-- Output ONLY the English search terms on one line: no explanation, no quotes, no trailing punctuation.
-- If the text is not a product at all (a greeting, a question, random letters), output ${UNKNOWN} followed, on the same line, by one short sentence in the language the person wrote in, saying you could not tell which product they meant.
-Examples:
-چای → tea
-sartén → frying pan
-कप → cup
-кроссовки Nike 42 → Nike sneakers size 42
-کاور iPhone 15 Pro → iPhone 15 Pro case`;
-
 // A reply is in the user's writing system when it contains a letter from the same area of Unicode as the FIRST LETTER
 // of what the user typed. A property of the text, not a language list: Latin (U+0000–U+02FF) counts as one area, the
 // big ideographic/syllabic ranges from U+3000 are grouped by 0x1000, everything else by its 0x100 block. The live
@@ -54,45 +38,14 @@ export function sharesWritingSystem(question, reply) {
   return false;
 }
 
-// The model's "could not tell" sentence, in the user's language — or undefined when it is missing, runs past one short
-// line, carries the token again, or is not in the user's writing system (the app then uses its own sentence).
-function unknownMessage(query, text) {
-  const msg = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!msg || msg.length > 240 || /\[\[|\]\]|https?:/i.test(msg)) return undefined;
-  return sharesWritingSystem(query, msg) ? msg : undefined;
-}
+// acceptIntent DELETED 2026-09-24 with the contract it parsed. Its rules were not lost: every one of them —
+// quotes and a trailing stop stripped, only the first line, a model number must survive verbatim, non-Latin
+// and over-long answers refused, [[UNKNOWN]] honoured — is asserted against acceptStructuredIntent, which is
+// the parser a query actually passes through now.
 
-const UNKNOWN_LOOSE = /\[+\s*UNKNOWN\s*\]+/i;
-
-// PURE + unit-tested: accept or refuse a model answer for a query.
-export function acceptIntent(query, raw) {
-  const all = String(raw || '');
-  const u = all.match(UNKNOWN_LOOSE);
-  if (u) {
-    const message = unknownMessage(query, all.slice(u.index + u[0].length));
-    return message ? { resolved: false, reason: 'unknown', message } : { resolved: false, reason: 'unknown' };
-  }
-  const out = all.split('\n')[0].trim().replace(/^["'“”«»]+|["'“”«».]+$/g, '').trim();
-  if (!out) return { resolved: false, reason: 'empty' };
-  if (out.length > 200) return { resolved: false, reason: 'rejected' };
-  // Latin-script answer only: a letter from any other script means the model echoed or half-translated.
-  if (/[^\P{L}\p{Script=Latin}]/u.test(out)) return { resolved: false, reason: 'rejected' };
-  const low = out.toLowerCase();
-  for (const tok of String(query || '').split(/\s+/)) {
-    if (/\d/.test(tok) && !low.includes(tok.toLowerCase())) return { resolved: false, reason: 'rejected' };
-  }
-  return { resolved: true, query: out };
-}
-
-// One model call. Throws only on a model/runtime error (the route maps it to unresolved).
-export async function resolveIntent(env, query) {
-  const r = await env.AI.run(INTENT_MODEL, {
-    messages: [{ role: 'system', content: INTENT_PROMPT }, { role: 'user', content: query }],
-    max_tokens: 100,   // room for the "could not tell" sentence in scripts that cost more tokens
-    temperature: 0,
-  });
-  return acceptIntent(query, r?.response);
-}
+// resolveIntent + INTENT_PROMPT DELETED 2026-09-24. resolveStructuredIntent replaced its only caller, which
+// left a function that CAN SPEND with no user path reaching it — exactly what the spend-reachability gate
+// refuses, and it caught this within minutes of the change. Dead code that can bill is worse than dead code.
 
 // ── cache: GLOBAL and identifier-free ────────────────────────────────────────
 // Keyed by sha256(namespace || query) — the resolver's namespace is 'intent' — the RAW query is never stored (only its hash), there is
@@ -128,7 +81,7 @@ export async function cacheSet(env, query, source, translated, at) {
 
 // ── STRUCTURED INTENT (Ehsan 2026-09-24) ─────────────────────────────────────
 // One model call, same model, a contract that carries the MEANING instead of a dictionary word. The old
-// resolveIntent stays until every caller is moved, so a deploy cannot half-change the answer shape.
+// One model call, one contract. The previous word-only resolver is gone (see above).
 import { STRUCTURED_INTENT_PROMPT, acceptStructuredIntent } from './intent.js';
 
 export async function resolveStructuredIntent(env, query) {

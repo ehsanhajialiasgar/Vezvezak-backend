@@ -27,7 +27,7 @@
  */
 
 import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly, mustAffect, mustAffectAll } from './lib.js';
-import { resolveIntent, resolveStructuredIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
+import { resolveStructuredIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate, appleConfig, appleKeyProbe, credentialFingerprints } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
@@ -1362,7 +1362,7 @@ async function usageRecord(request, env) {
 //
 // FLAG-GATED like /ai/chat (Ehsan 2026-08-30): the search text reaches a language model only when
 // AI_NORMALIZE_ENABLED === '1' — a committed, reviewable change that follows the policy page, never a bare deploy.
-// When off it fails CLOSED on egress: resolved:false and env.AI / resolveIntent are never reached. The check sits FIRST.
+// When off it fails CLOSED on egress: resolved:false and env.AI / resolveStructuredIntent are never reached. The check sits FIRST.
 const NORMALIZE_DAILY_MAX = 20000; // GLOBAL safety ceiling (no per-user slot). Over it → unresolved.
 export async function aiNormalize(request, env) {
   const body = (await readJson(request)) || {};
