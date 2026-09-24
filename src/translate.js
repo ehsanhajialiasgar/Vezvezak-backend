@@ -137,5 +137,7 @@ export async function resolveStructuredIntent(env, query) {
     max_tokens: 220,   // room for the JSON, the ambiguous option list, or the "could not tell" sentence
     temperature: 0,
   });
-  return acceptStructuredIntent(query, r?.response, sharesWritingSystem);
+  const out = acceptStructuredIntent(query, r?.response, sharesWritingSystem);
+  if (env.INTENT_DEBUG === '1') console.log('RAW_INTENT', JSON.stringify(String(r?.response || '').slice(0, 400)));
+  return out;
 }

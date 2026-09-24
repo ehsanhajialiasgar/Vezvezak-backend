@@ -57,6 +57,11 @@ const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
 // PURE. Accept or refuse a model answer. Every branch runnable, because the lesson from a lock whose decision
 // sat in an onPress is that a decision inside a call nothing can run is a decision nobody has checked.
 export function acceptStructuredIntent(query, raw, sharesWritingSystem) {
+  // THE MODEL MAY ANSWER WITH AN OBJECT, NOT A STRING (measured against the live binding 2026-09-24).
+  // Workers AI hands back `response` already parsed when the model emits JSON, and String() on that yields the
+  // literal "[object Object]" — so the brace match below never fired and EVERY query came back 'empty'. The old
+  // contract never met this because it asked for a plain line. Both shapes are read, and neither is assumed.
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return fromObject(query, raw);
   const all = String(raw || '');
   const u = all.match(UNKNOWN_LOOSE);
   if (u) {
@@ -70,6 +75,11 @@ export function acceptStructuredIntent(query, raw, sharesWritingSystem) {
   let obj;
   try { obj = JSON.parse(m[0]); } catch { return { resolved: false, reason: 'rejected' }; }
   if (!obj || typeof obj !== 'object') return { resolved: false, reason: 'rejected' };
+  return fromObject(query, obj);
+}
+
+// The same judgement, whether the JSON arrived parsed or as text. One place, so the two paths cannot drift.
+function fromObject(query, obj) {
 
   // AMBIGUOUS: two to four options, each a known category. Fewer than two is not an ambiguity, and an unknown
   // category id cannot be filtered on, so a malformed option set is refused rather than half-used.
