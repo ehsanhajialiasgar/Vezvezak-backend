@@ -27,7 +27,7 @@
  */
 
 import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly, mustAffect, mustAffectAll } from './lib.js';
-import { resolveIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
+import { resolveIntent, resolveStructuredIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
 import { iapValidate, appleConfig, appleKeyProbe, credentialFingerprints } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
@@ -1371,24 +1371,41 @@ export async function aiNormalize(request, env) {
   if (env.AI_NORMALIZE_ENABLED !== '1') return ok({ query, resolved: false, reason: 'disabled' });
   if (!query || !env.AI) return ok({ query, resolved: false, reason: 'unavailable' });
 
-  // Cache first: a hit costs nothing and does NOT touch the daily ceiling. [[UNKNOWN]] is cached too.
-  const hit = await cacheGet(env, query, 'intent');
+  // CACHE NAMESPACE 'intent2' (Ehsan 2026-09-24). The old namespace holds answers produced under the previous
+  // contract — the one that turned «کیف» into the bare word "bag". Serving those would be exactly the defect
+  // this change exists to remove: a cached result from a different, lossier intent. A new namespace retires
+  // them without a migration, and they age out on their own under CACHE_RETENTION_MS.
+  //
+  // THE CACHED VALUE IS THE WHOLE INTENT, not the terms: category and attributes decide what is relevant
+  // later, so a hit that returned terms alone would send the filter into the same blindness.
+  const hit = await cacheGet(env, query, 'intent2');
   if (hit != null && hit.startsWith(UNKNOWN)) {
     const message = hit.slice(UNKNOWN.length).trim();
     return ok(message ? { query, resolved: false, reason: 'unknown', message } : { query, resolved: false, reason: 'unknown' });
   }
-  if (hit != null) return ok({ query: hit, resolved: true });
+  if (hit != null) { try { return ok(intentAnswer(JSON.parse(hit))); } catch { /* fall through and re-resolve */ } }
 
   const gate = await rateLimit(env, 'ai:normalize', NORMALIZE_DAILY_MAX, 86_400_000);
   if (!gate.allowed) return ok({ query, resolved: false, reason: 'busy' });
 
   let r;
-  try { r = await resolveIntent(env, query); }
+  try { r = await resolveStructuredIntent(env, query); }
   catch { return ok({ query, resolved: false, reason: 'model_error' }); }
-  if (r.resolved) await cacheSet(env, query, 'intent', r.query, Date.now());
-  else if (r.reason === 'unknown') await cacheSet(env, query, 'intent', r.message ? `${UNKNOWN} ${r.message}` : UNKNOWN, Date.now());
-  if (r.resolved) return ok({ query: r.query, resolved: true });
-  return ok(r.message ? { query, resolved: false, reason: r.reason, message: r.message } : { query, resolved: false, reason: r.reason });
+  // An AMBIGUOUS answer is cached like any other: the ambiguity is a fact about the word, not about the user,
+  // and asking the model again would cost the same and say the same thing.
+  if (r.resolved || r.reason === 'ambiguous') await cacheSet(env, query, 'intent2', JSON.stringify(r), Date.now());
+  else if (r.reason === 'unknown') await cacheSet(env, query, 'intent2', r.message ? `${UNKNOWN} ${r.message}` : UNKNOWN, Date.now());
+  return ok(intentAnswer(r, query));
+}
+
+// The wire shape. `query` carries the resolved terms so every existing client keeps working unchanged while
+// the new fields — category, attrs, options — are what the relevance filter and the ambiguity chips read.
+function intentAnswer(r, original) {
+  if (r.resolved) return { query: r.terms, resolved: true, category: r.category, attrs: r.attrs || {} };
+  if (r.reason === 'ambiguous') return { query: original, resolved: false, reason: 'ambiguous', options: r.options };
+  return r.message
+    ? { query: original, resolved: false, reason: r.reason, message: r.message }
+    : { query: original, resolved: false, reason: r.reason };
 }
 
 // ── /ai/chat — STAGE 1: GROUNDED-IN-RESULTS ONLY (Ehsan 2026-08-27) ────────────

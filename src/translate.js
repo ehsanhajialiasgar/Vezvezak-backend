@@ -125,3 +125,17 @@ export async function cacheSet(env, query, source, translated, at) {
     // A cache write failure is non-fatal — the translation still returns.
   }
 }
+
+// ── STRUCTURED INTENT (Ehsan 2026-09-24) ─────────────────────────────────────
+// One model call, same model, a contract that carries the MEANING instead of a dictionary word. The old
+// resolveIntent stays until every caller is moved, so a deploy cannot half-change the answer shape.
+import { STRUCTURED_INTENT_PROMPT, acceptStructuredIntent } from './intent.js';
+
+export async function resolveStructuredIntent(env, query) {
+  const r = await env.AI.run(INTENT_MODEL, {
+    messages: [{ role: 'system', content: STRUCTURED_INTENT_PROMPT }, { role: 'user', content: query }],
+    max_tokens: 220,   // room for the JSON, the ambiguous option list, or the "could not tell" sentence
+    temperature: 0,
+  });
+  return acceptStructuredIntent(query, r?.response, sharesWritingSystem);
+}

@@ -47,22 +47,26 @@ const env = (flags = {}) => ({ DB: D1, JWT_SECRET: 's', AI, AI_NORMALIZE_ENABLED
 const req = (body, token) => ({ headers: { get: k => (k.toLowerCase() === 'authorization' && token ? `Bearer ${token}` : null) }, json: async () => body });
 const call = async (fn, e, body, token) => { const r = await fn(req(body, token), e); return { status: r.status, body: await r.json() }; };
 
+// ANSWER SHAPE CHANGED 2026-09-24: the resolver returns an INTENT (terms + category), not a bare English word.
+// «کیف» used to resolve to "bag" and the results were bin liners. The assertions below are unchanged in what
+// they claim; the stub answers now speak the contract the route actually asks for.
+const J = (terms, category, attrs = {}) => JSON.stringify({ terms, category, attrs });
 console.log('\n/ai/normalize — intent, any script, checked, cached, retained 30 days');
 await t('flag off → resolved:false "disabled", and the model is never called', async () => {
-  calls = []; answers = { 'نمک': 'salt' };
+  calls = []; answers = { 'نمک': J('salt', 'grocery.food') };
   const r = await call(aiNormalize, env({ AI_NORMALIZE_ENABLED: '0' }), { query: 'نمک' });
   assert.deepEqual([r.body.resolved, r.body.reason, r.body.query], [false, 'disabled', 'نمک']);
   assert.equal(calls.length, 0);
 });
 await t('نمک → salt (resolved); the second ask is served from the cache (one model call)', async () => {
-  calls = []; answers = { 'نمک': 'salt' };
+  calls = []; answers = { 'نمک': J('salt', 'grocery.food') };
   const a = await call(aiNormalize, env(), { query: 'نمک' });
   const b = await call(aiNormalize, env(), { query: 'نمک' });
   assert.deepEqual([a.body.resolved, a.body.query, b.body.query], [true, 'salt', 'salt']);
   assert.equal(calls.length, 1);
 });
 await t('no language list: plain-ASCII Spanish goes to the model too', async () => {
-  calls = []; answers = { silla: 'chair' };
+  calls = []; answers = { silla: J('chair', 'furniture') };
   const r = await call(aiNormalize, env(), { query: 'silla' });
   assert.deepEqual([r.body.resolved, r.body.query, calls.length], [true, 'chair', 1]);
 });
@@ -79,12 +83,12 @@ await t('[[UNKNOWN]] with a sentence in the user\'s language → the sentence is
   assert.deepEqual([a.body.reason, a.body.message, b.body.message, calls.length], ['unknown', 'لطفا محصول مورد نظر خود را به روش دیگری بنامید', 'لطفا محصول مورد نظر خود را به روش دیگری بنامید', 1]);
 });
 await t('a model number the answer dropped → rejected (never a guessed product)', async () => {
-  answers = { 'هدفون WH-1000XM5': 'wireless headphones' };
+  answers = { 'هدفون WH-1000XM5': J('wireless headphones', 'audio') };
   const r = await call(aiNormalize, env(), { query: 'هدفون WH-1000XM5' });
   assert.deepEqual([r.body.resolved, r.body.reason], [false, 'rejected']);
 });
 await t('an answer still in another script → rejected', async () => {
-  answers = { 'میز چوبی': 'میز wooden' };
+  answers = { 'میز چوبی': J('میز wooden', 'furniture') };
   const r = await call(aiNormalize, env(), { query: 'میز چوبی' });
   assert.equal(r.body.resolved, false);
 });
@@ -97,7 +101,7 @@ await t('retention: an entry older than 30 days is not used, and a write deletes
   const old = Date.now() - CACHE_RETENTION_MS - 60_000;
   db.prepare("INSERT INTO translation_cache (k, translated, at) VALUES ('stale-key', 'stale', ?)").run(old);
   db.prepare('UPDATE translation_cache SET at = ?').run(old);   // every entry so far is now expired
-  calls = []; answers = { 'نمک': 'salt' };
+  calls = []; answers = { 'نمک': J('salt', 'grocery.food') };
   const r = await call(aiNormalize, env(), { query: 'نمک' });
   assert.deepEqual([r.body.query, calls.length], ['salt', 1], 'expired cache entry was not used');
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM translation_cache WHERE at < ?").get(Date.now() - CACHE_RETENTION_MS).n, 0);
