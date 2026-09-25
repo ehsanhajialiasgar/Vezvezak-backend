@@ -28,7 +28,7 @@
 
 import { CORS, json, ok, fail, uid, nowIso, sha256, hashPassword, verifyPassword, signJwt, requireAuth, normalizeIdentifier, channelOf, rateLimit, ipHash, readJson, planFor, bucketSubject, emailOnly, mustAffect, mustAffectAll } from './lib.js';
 import { resolveStructuredIntent, cacheGet, cacheSet, UNKNOWN } from './translate.js';
-import { iapValidate, appleConfig, appleKeyProbe, credentialFingerprints } from './iap.js';
+import { iapValidate, appleConfig, appleKeyProbe, credentialFingerprints, appleNotification } from './iap.js';
 import { compRedeem } from './comp.js';
 import { MAIL_FAIL, classifyMailStatus, mailFailure } from './mail.js';
 import { codeEmail, SUPPORT_EMAIL } from './mailTemplate.js';
@@ -1538,6 +1538,10 @@ export default {
       // Deprecated advisory shims (removed in the Part 2 client migration).
       if (post && p === '/iap/validate') return iapValidate(request, env);
       if (post && p === '/iap/diagnose') return iapDiagnose(request, env);
+      // APPLE POSTS HERE. No auth header: the sender is Apple's server, not a signed-in user, and the payload
+      // is treated as untrusted — see appleNotification. The URL is the secret-ish part, which is why it is
+      // not guessable, and why nothing is granted on the notification's word alone.
+      if (post && p === '/iap/apple-notifications') return appleNotification(request, env);
       if (post && p === '/comp/redeem') return compRedeem(request, env);
       if (post && p === '/usage/check') return usageCheck(request, env);
       if (post && p === '/usage/record') return usageRecord(request, env);

@@ -353,3 +353,23 @@ CREATE TABLE IF NOT EXISTS translation_cache (
   at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_translation_cache_at ON translation_cache(at);
+
+-- apple_notifications — App Store Server Notifications v2, processed exactly once (Ehsan 2026-09-25).
+--
+-- Apple RETRIES a notification it did not get a 2xx for, and retries are not deduplicated by Apple. Without a
+-- record of what has been handled, a retry of REFUND would run the revocation twice — harmless here, but a
+-- retry of a RENEWAL would extend an entitlement twice, which is not. notification_uuid is Apple's own id for
+-- the delivery and is the idempotency key.
+--
+-- WHAT IS NOT STORED: the signed payload. It carries the customer's transaction detail and we have no use for
+-- it after the entitlement is updated — the authoritative copy lives with Apple, and we re-ask them rather
+-- than trusting anything in it.
+CREATE TABLE IF NOT EXISTS apple_notifications (
+  notification_uuid TEXT PRIMARY KEY,
+  notification_type TEXT,
+  subtype           TEXT,
+  original_transaction_id TEXT,
+  outcome           TEXT,   -- what we DID: 'granted' | 'revoked' | 'ignored_unknown_txn' | 'refused_unverified'
+  received_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_apple_notif_txn ON apple_notifications(original_transaction_id);

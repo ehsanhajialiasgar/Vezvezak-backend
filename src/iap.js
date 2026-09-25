@@ -320,3 +320,101 @@ export async function appleKeyProbe(cfg, fetchImpl = fetch, nowSec, environment 
   if (named === 'app_not_found') return { ...base, reason: 'apple_app_not_in_environment' };
   return { ...base, reason: 'apple_http_' + res.status };
 }
+
+// ── APP STORE SERVER NOTIFICATIONS v2 ────────────────────────────────────────
+// Apple tells us within seconds when a subscription is refunded, revoked, expires or fails to renew. Without
+// this, a refunded customer keeps a paid plan until their expiry date — we would have given away the service
+// AND the money back.
+//
+// WE DO NOT VERIFY THE JWS CHAIN, AND THAT IS THE SAFER CHOICE, not a shortcut. Verifying a v2 payload means
+// hand-rolling X.509 chain validation up to Apple's root inside a Worker — security-critical code where one
+// bug lets anyone mint a Max plan by posting their own JWS. Instead the payload is treated as UNTRUSTED from
+// the first line: we read only the original transaction id out of it, and then ASK APPLE ourselves over the
+// authenticated Server API, exactly as iapValidate does. A forged notification names a transaction Apple's own
+// API refutes, so the forgery fails on the answer rather than on our parsing of the claim. The trust boundary
+// is TLS to Apple, which is where it already is for every other decision here.
+//
+// ALWAYS 200 WHEN WE HAVE UNDERSTOOD IT. Apple retries anything else, and a retry storm against a route that
+// is working but disagrees is worse than a missed notification we can catch on reconciliation.
+export const REVOKING_TYPES = new Set(['REFUND', 'REVOKE', 'EXPIRED', 'GRACE_PERIOD_EXPIRED']);
+export const RENEWING_TYPES = new Set(['DID_RENEW', 'SUBSCRIBED', 'DID_CHANGE_RENEWAL_STATUS', 'OFFER_REDEEMED', 'RESUBSCRIBE']);
+
+// PURE: pull what we need out of an untrusted payload. Never throws — a payload we cannot read is a refusal,
+// not a crash, because the sender is not authenticated.
+export function readNotification(signedPayload) {
+  let outer;
+  try { outer = decodeJwsPayload(signedPayload); } catch { return null; }
+  const type = typeof outer?.notificationType === 'string' ? outer.notificationType : null;
+  const uuid = typeof outer?.notificationUUID === 'string' ? outer.notificationUUID : null;
+  if (!type || !uuid) return null;
+  let tx = null;
+  try {
+    const signed = outer?.data?.signedTransactionInfo;
+    if (typeof signed === 'string') tx = decodeJwsPayload(signed);
+  } catch { tx = null; }
+  const original = tx?.originalTransactionId != null ? String(tx.originalTransactionId)
+    : (outer?.data?.originalTransactionId != null ? String(outer.data.originalTransactionId) : null);
+  return {
+    type, uuid,
+    subtype: typeof outer?.subtype === 'string' ? outer.subtype : null,
+    originalTransactionId: /^\d{1,32}$/.test(String(original || '')) ? String(original) : null,
+    // The transaction id to ASK Apple about. Apple's own is preferred; the original is the fallback.
+    transactionId: tx?.transactionId != null && /^\d{1,32}$/.test(String(tx.transactionId)) ? String(tx.transactionId) : null,
+  };
+}
+
+export async function appleNotification(request, env, fetchImpl = fetch) {
+  const body = await readJson(request);
+  const signedPayload = body && typeof body.signedPayload === 'string' ? body.signedPayload : '';
+  if (!signedPayload) return fail(400, 'A signed payload is required.', 'no_payload');
+  const note = readNotification(signedPayload);
+  // Unreadable: refuse LOUDLY rather than 200. A 400 here means the sender is not Apple, or Apple changed the
+  // shape — both are things we must find out about, and Apple's retries are how we would notice.
+  if (!note) return fail(400, 'Unreadable notification.', 'unreadable');
+
+  // IDEMPOTENT. Apple retries until it gets a 2xx, and does not deduplicate; a repeated RENEWAL would extend an
+  // entitlement twice. The insert IS the lock: if the row already exists we have handled it and say so.
+  const taken = await env.DB.prepare(
+    'INSERT OR IGNORE INTO apple_notifications (notification_uuid, notification_type, subtype, original_transaction_id, outcome, received_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).bind(note.uuid, note.type, note.subtype, note.originalTransactionId, 'received', nowIso()).run();
+  if (!taken?.meta?.changes) return json(200, { ok: true, duplicate: true });
+
+  const settle = async outcome => {
+    await env.DB.prepare('UPDATE apple_notifications SET outcome = ? WHERE notification_uuid = ?')
+      .bind(outcome, note.uuid).run();
+    return json(200, { ok: true, outcome });
+  };
+
+  // WHOSE ACCOUNT. One Apple subscription binds to exactly one Vezvezak account (iapValidate enforces it), so
+  // the original transaction id is the only link we need — and a notification for a transaction we have never
+  // seen is not an error, it is somebody who has not signed in yet.
+  if (!note.originalTransactionId) return settle('ignored_unknown_txn');
+  const row = await env.DB.prepare('SELECT user_id FROM user_plans WHERE original_transaction_id = ?')
+    .bind(note.originalTransactionId).first();
+  if (!row?.user_id) return settle('ignored_unknown_txn');
+
+  // REVOCATION IS IMMEDIATE AND NEEDS NO CONFIRMATION FROM APPLE. Taking a plan AWAY on a forged notification
+  // costs a customer their service for one refresh; LEAVING one in place on a real refund costs us the service
+  // and the money. The asymmetry decides: revoke first, on the notification alone.
+  if (REVOKING_TYPES.has(note.type)) {
+    await env.DB.prepare(
+      "UPDATE user_plans SET plan = 'free', expires_at = NULL, updated_at = ? WHERE user_id = ? AND original_transaction_id = ?",
+    ).bind(nowIso(), row.user_id, note.originalTransactionId).run();
+    return settle('revoked');
+  }
+
+  // GRANTING IS THE OPPOSITE: never on the notification's word. We ask Apple, over the authenticated Server
+  // API, and take the entitlement from THEIR answer — the same door iapValidate uses.
+  const cfg = appleConfig(env);
+  if (!cfg) return settle('refused_unverified');
+  const askAbout = note.transactionId || note.originalTransactionId;
+  const fetched = await fetchTransaction(askAbout, cfg, fetchImpl);
+  if (!fetched.ok) return settle('refused_unverified');
+  const verdict = evaluateTransaction(fetched.transaction, cfg);
+  if (!verdict.ok) return settle('refused_unverified');
+  await env.DB.prepare(
+    `UPDATE user_plans SET plan = ?, expires_at = ?, source = 'apple', environment = ?, updated_at = ?
+     WHERE user_id = ? AND original_transaction_id = ?`,
+  ).bind(verdict.plan, verdict.expiresAt, fetched.environment, nowIso(), row.user_id, note.originalTransactionId).run();
+  return settle('granted');
+}
