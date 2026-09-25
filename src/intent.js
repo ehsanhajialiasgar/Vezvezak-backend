@@ -19,6 +19,13 @@
 // to be that blunt about a constraint at the centre of the patent, and a product taxonomy is not a reason to
 // blunt it. The vocabulary moved; the rule did not.
 //
+// THE AMBIGUITY RULE WAS THE WEAK PART, AND IT WAS THE PROMPT (measured 2026-09-25, not guessed).
+// On the 378-query set, Haiku 4.5 detected only 6 of 20 genuinely ambiguous words with the first wording —
+// worse than the model it would replace. Rather than pay 4.7x for a stronger model to buy that one property,
+// the question was tested: same model, one rewritten instruction → 18 of 20, with the unambiguous control
+// still 20 of 20, so it did not simply become trigger-happy. The named examples and the "a second word usually
+// means it is not ambiguous" clause are both load-bearing; the control is what proves the second one.
+//
 // THE CATEGORY VOCABULARY IS CLOSED. A free-form category from a model cannot be compared against anything, so
 // filtering on it would be theatre. These are the buckets the filter actually uses; the model must pick one.
 export const CATEGORIES = [
@@ -48,6 +55,7 @@ Rules:
 - category: exactly one id from this list: ${CATEGORIES.join(' ')}
 - bags.smallleather covers billfolds, card holders and coin purses.
 - attrs: fill only what the query actually states; leave the rest as empty strings. Never invent a brand or size.
+- ASK BEFORE YOU GUESS. Before answering, check: could an ordinary shopper typing this ONE word reasonably have meant products in two DIFFERENT categories from the list? Bare, common nouns very often can — "mouse" is a computer part or a pet, "tablet" is a computer or a medicine, "iron" is an appliance or a metal, "case" is a phone cover or a suitcase. If so you MUST NOT pick one. Picking one and being wrong wastes the shopper's time; asking costs them one tap. A query with a brand, a model, a size, a material or any second word is usually NOT ambiguous — answer those normally.
 - IF THE QUERY HAS MORE THAN ONE PLAUSIBLE BUYING INTENT in DIFFERENT categories, do not choose. Answer instead:
   {"ambiguous":[{"category":"<id>","terms":"<english terms>"}, ...]}  with 2 to 4 options, most likely first.
 - If it is not a product at all (a greeting, a question, random letters), output ${UNKNOWN} followed on the same line by one short sentence, in the language the person wrote in, saying you could not tell which product they meant.
