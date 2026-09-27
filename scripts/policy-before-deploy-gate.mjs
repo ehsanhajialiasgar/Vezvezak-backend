@@ -136,6 +136,16 @@ const PHRASE = {
   'user_plans.original_transaction_id': 'original transaction ID',
   'user_plans.environment': 'test (sandbox)',
   'user_plans.comp_redeemed': 'hash of each code you redeemed',
+  // App Store Server Notifications v2 (Ehsan approved 2026-09-25, published 2026-09-27). The §2 row names the
+  // three things kept and the one thing not kept. Each column maps to the phrase that actually describes IT,
+  // not to the row as a whole — a column whose phrase is only vaguely nearby is how a policy drifts from the
+  // database while both look fine.
+  'apple_notifications.notification_uuid': 'the identifier of that notice',
+  'apple_notifications.notification_type': 'its type',
+  'apple_notifications.subtype': 'its type',
+  'apple_notifications.original_transaction_id': 'original transaction ID',
+  'apple_notifications.outcome': 'ends your paid plan straight away',
+  'apple_notifications.received_at': 'the time we received it',
 };
 
 // A published SENTENCE a new route falsifies. Derived: the routes are read from src/index.js at HEAD and at BASELINE;
